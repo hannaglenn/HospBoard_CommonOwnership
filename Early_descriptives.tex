@@ -1,0 +1,136 @@
+\documentclass[12pt]{article}
+
+\usepackage{tgtermes}
+\usepackage{epsf}
+\usepackage{epstopdf}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue]{hyperref}
+\usepackage{dcolumn}
+\usepackage{amsmath, amsthm, amssymb}
+\usepackage{mwe}
+\usepackage{url}
+%\usepackage{harvard}
+\usepackage{fancyhdr}
+\usepackage{longtable}
+\usepackage{authblk}
+\usepackage{setspace}
+%\usepackage[nomarkers]{endfloat}
+\usepackage{float}
+\usepackage{bbm}
+%\usepackage{titling}
+\usepackage{subcaption}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{import}
+\usepackage[backend=biber,style=authoryear,
+sorting=ynt,citestyle=authoryear]{biblatex}
+\addbibresource{papercitations.bib}
+%\usepackage[nomarkers,nofiglist,notablist]{endfloat}
+\usepackage{subcaption}
+\usepackage{caption}
+
+\onehalfspacing
+\textwidth 6.5in \oddsidemargin 0in \evensidemargin -0.6in
+\textheight 8.5in \topmargin -0.2in
+
+\newcolumntype{L}[1]{>{\raggedright\let\newline\\
+		\arraybackslash\hspace{0pt}}m{#1}}
+\newcolumntype{C}[1]{>{\centering\let\newline\\
+		\arraybackslash\hspace{0pt}}m{#1}}
+\newcolumntype{R}[1]{>{\raggedleft\let\newline\\
+		\arraybackslash\hspace{0pt}}m{#1}}
+\newcolumntype{P}[1]{>{\raggedright\tabularxbackslash}p{#1}}
+
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+
+\captionsetup{justification=centering,singlelinecheck=false}
+
+
+
+
+\begin{document}
+	
+	
+	
+	
+	\linespread{1.2}\title{\vspace{-0.5in} Common Ownership on Boards\\ \large Evidence from Nonprofit Hospitals} 
+	
+	\date{\today}
+	
+	\author{\vspace{10mm}Hanna Glenn\footnote{Department of Economics, Emory University, 1602 Fishburne Drive, Atlanta, GA 30322, hanna.glenn@emory.edu.} }
+	
+	\maketitle
+	
+	\singlespacing
+
+    \vspace{3mm}
+	
+    \begin{abstract}
+		{\small
+          
+		} 
+	\end{abstract}
+	
+	
+	
+	
+	
+
+	
+	\onehalfspacing
+	
+	\newpage
+
+
+    \section{Early Descriptives: Connected in System}
+
+    \begin{figure}[ht!]
+        \centering
+        \includegraphics[width=\textwidth]{Objects/connected_systems_percent.pdf}
+    \end{figure}
+
+    \newpage
+    
+
+    \begin{figure}[ht!]
+    \centering
+        \includegraphics[width=.9\textwidth]{Objects/common_boards_insystem_maps.pdf}
+        \label{fig:outcomes_graph}
+    \end{figure}
+    
+
+    \import{Objects}{means_insystem_table.tex}
+
+    \import{Objects}{connected_syspair_diff_table.tex}
+
+
+    \newpage
+
+    \section{Early Descriptives: Independent Connected Hospitals}
+
+    \begin{figure}[ht!]
+        \centering
+        \includegraphics[width=\textwidth]{Objects/connected_independent_percent.pdf}
+    \end{figure}
+    
+
+    \begin{figure}[ht!]
+    \centering
+        \includegraphics[width=\textwidth]{Objects/common_boards_independent_maps.pdf}
+        \label{fig:outcomes_graph}
+    \end{figure}
+    
+
+    \import{Objects}{means_independent_table.tex}
+
+    \import{Objects}{connected_indpair_diff_table.tex}
+    
+
+
+
+\end{document}
