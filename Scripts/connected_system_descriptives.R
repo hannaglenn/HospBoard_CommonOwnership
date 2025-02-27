@@ -6,8 +6,9 @@ library(stringr)
 library(ggplot2)
 library(patchwork)
 library(readr)
+library(kableExtra)
 
-created_data_path <- "C:\\Users\\hkagele\\Downloads\\"
+created_data_path <- "CreatedData/"
 
 ## Compare connected systems to unconnected systems 
 
@@ -37,7 +38,7 @@ board_people <- board_people %>%
   filter(str_count(name_cleaned, " ")>0)
 
 # join AHA data to get HRR and state
-AHA <- read_csv(paste0(created_data_path, "AHAdata_20052023.csv")) %>%
+AHA <- read_csv("RawData/AHAdata_20052023.csv") %>%
   select(ID, YEAR, STCD, HRRCODE, SYSID) %>%
   filter(YEAR>=2015 & YEAR<=2023) %>%
   mutate(YEAR = as.character(YEAR))
@@ -55,12 +56,12 @@ source("Scripts//function1_standardize_names.R")
 
 # combine names that have a slight misspelling using the standardize names function
 # these have to be in the same EIN to be combined
-board_people <- standardize_names(board_people, max_dist = 2)
+board_people <- standardize_names(board_people, max_dist = 3)
 
 # also standardize names that are a very close match within the same HRR and/or state
 board_people <- board_people %>%
   rename(hrrcode = HRRCODE) %>%
-  standardize_names_hrr(., max_dist = 1)
+  standardize_names_hrr(., max_dist = 2)
 
 # run the script titled "function2_find_common_board_members"
 source("Scripts//function2_identify_common_members.R")
@@ -88,7 +89,7 @@ board_people <- board_people %>%
 board_people$other_ein <- str_trim(board_people$other_ein)
 
 # Bring in the AHA data to merge in system and geographic information on the hospitals
-AHA <-  read_csv(paste0(created_data_path, "AHAdata_20052023.csv"))
+AHA <-  read_csv("RawData/AHAdata_20052023.csv")
 
 # Keep AHA variables I want
 AHA <- AHA %>%
@@ -143,7 +144,7 @@ hospital_connections <- hospital_connections %>%
   mutate(connected_samesys = ifelse(other_ein!="" & filer_hrrcode==other_hrrcode & filer_sysid==other_sysid, 1, 0)) %>%
   mutate(connected_diffsys = ifelse(other_ein!="" & filer_hrrcode==other_hrrcode & (filer_sysid!=other_sysid | is.na(other_sysid)), 1, 0))
 
-observe <- hospital_connections %>%
+hospital_connections %>%
   filter(unconnected_in_HRR==0 & connected_samesys==0 & connected_diffsys==0)
 
 # how many hospitals are connected in same system each year?
@@ -167,7 +168,7 @@ hospital_connections %>%
        x = "Year",
        y = "Percent\n") +
   theme_minimal() + xlim(2016,2022) + ylim(-.1,1)
-ggsave("Objects//connected_systems_percent.pdf", width=6, height=4)
+ggsave("Objects//connected_systems_percent.pdf", width=5, height=4)
 
 
 # plot geographically the systems that are connected
@@ -219,9 +220,6 @@ plot_map <- function(df, year) {
 # read in map data
 us_states <- map_data("state")
 
-
-# 1. Geographic map of connection within the same HRR excluding systems
-
 plot_map(hospital_connections, 2017)
 
 # Generate maps for each year (2017-2022)
@@ -241,7 +239,7 @@ hosp_data <- hospital_connections %>%
   distinct(Filer.EIN, filer_id, TaxYr, connected_samesys, unconnected_in_HRR) 
 
 # Read in AHA data and keep variables I need
-AHA <- read_csv(paste0(created_data_path, "AHAdata_20052023.csv"))
+AHA <- read_csv("RawData/AHAdata_20052023.csv")
 
 AHA <- AHA %>%
   select(YEAR, ID, GENBD, PEDBD, OBBD, MSICBD, CICBD, NICBD, NINTBD, PEDICBD, BRNBD, SPCICBD, OTHICBD, REHABBD, ALCHBD, PSYBD, SNBD88, ICFBD88, ACULTBD, 
@@ -333,7 +331,15 @@ summary_table <- summary_table %>%
 # create a knitr table
 table <- knitr::kable(summary_table, format = "latex",
       col.names = c("Variable", "Unconnected", "Connected in same system"),
-      caption = "Means for in-system hospitals")
+      caption = "Means for in-system hospitals",
+      row.names = FALSE,
+      table.envir="table",
+      digits=2,
+      booktabs=TRUE,
+      escape=F,
+      align=c("l","c"),
+      position="ht!") %>%
+  kable_styling(full_width=F)
 # save as a tex file
 write(table, file="Objects//means_insystem_table.tex")
 
@@ -355,13 +361,6 @@ pairs <- pairs %>%
   rename(other_HOSPBD = HOSPBD, other_physicians_per_bed = physicians_per_bed, other_nurses_per_bed = nurses_per_bed, 
          other_num_services = num_services, other_hhi = hhi, other_NICU = NICU, other_cath_lab = cath_lab, 
          other_MCDDC = MCDDC, other_MCRDC = MCRDC)
-
-# create variable for medicare/medicaid discharges per bed
-pairs <- pairs %>%
-  mutate(filer_MCDDC = filer_MCDDC/filer_HOSPBD,
-         filer_MCRDC = filer_MCRDC/filer_HOSPBD,
-         other_MCDDC = other_MCDDC/other_HOSPBD,
-         other_MCRDC = other_MCRDC/other_HOSPBD)
 
 # for each variable, calculate the max and min within the pair
 pairs <- pairs %>%
@@ -385,7 +384,7 @@ pairs <- pairs %>%
          min_MCRDC = min(filer_MCRDC, other_MCRDC),
          max_MCRDC = max(filer_MCRDC, other_MCRDC))
 
-# calculate the average of the min and maxvariables in each year
+# calculate the average of the min and max variables in each year
 pairs_avgs <- pairs %>%
   ungroup() %>%
   summarise(min_hospbd = mean(min_hospbd, na.rm = TRUE),
@@ -455,7 +454,15 @@ pairs_avgs <- pairs_avgs %>%
 # Make a knitr table
 table <- knitr::kable(pairs_avgs, format = "latex",
       col.names = c("Variable", "Connected Pair Avg Min", "Connected Pair Avg Max", "Range in Pair", "Unconnected Avg"),
-      caption = "Difference in Hospitals with Common Board Members in the Same System")
+      caption = "Difference in Hospitals with Common Board Members in the Same System",
+      row.names = FALSE,
+      table.envir="table",
+      digits=2,
+      booktabs=TRUE,
+      escape=F,
+      align=c("l","c","c","c","c"),
+      position="ht!") %>%
+  kable_styling(full_width=F)
 write(table, file="Objects//connected_syspair_diff_table.tex")
 
 
