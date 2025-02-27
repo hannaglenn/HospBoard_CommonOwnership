@@ -32,6 +32,31 @@ board_people <- people %>%
   filter(board_member==1) %>%
   select(TaxYr, Filer.EIN, name_cleaned)
 
+# clean up extras in names
+board_people$name_cleaned <- str_remove(board_people$name_cleaned, "deceased")
+board_people$name_cleaned <- str_remove(board_people$name_cleaned, "\\seff$")
+board_people$name_cleaned <- str_remove(board_people$name_cleaned, "\\scsjp$")
+board_people$name_cleaned <- str_remove(board_people$name_cleaned, "\\scisa$")
+board_people$name_cleaned <- str_remove(board_people$name_cleaned, "^mrs\\s")
+board_people$name_cleaned <- str_remove(board_people$name_cleaned, "^reverend\\s")
+board_people$name_cleaned <- str_remove(board_people$name_cleaned, "\\scns$")
+
+
+
+# define function to normalize the name columns to take care of different order of first, last
+normalize_name <- function(name) {
+  # Split by spaces
+  parts <- unlist(strsplit(name, " "))
+  
+  # Remove single-letter initials (optional)
+  parts <- parts[nchar(parts) > 1]
+  
+  # Sort non-initial parts alphabetically
+  paste(sort(parts), collapse = " ")
+}
+
+board_people$name_cleaned <- sapply(board_people$name_cleaned, normalize_name)
+
 # remove empty names and one-word names
 board_people <- board_people %>%
   filter(str_detect(name_cleaned, "[a-zA-Z]")) %>%
@@ -140,17 +165,17 @@ hospital_connections <- hospital_connections %>%
 # define connections within the same HRR
 # 3 types of connections: unconnected, connected to hosp in the same system, connected to hosp in diff sys or no sys at all
 hospital_connections <- hospital_connections %>%
-  mutate(unconnected_in_HRR = ifelse(other_ein=="" | filer_hrrcode!=other_hrrcode, 1, 0)) %>%
   mutate(connected_samesys = ifelse(other_ein!="" & filer_hrrcode==other_hrrcode & filer_sysid==other_sysid, 1, 0)) %>%
-  mutate(connected_diffsys = ifelse(other_ein!="" & filer_hrrcode==other_hrrcode & (filer_sysid!=other_sysid | is.na(other_sysid)), 1, 0))
+  mutate(connected_diffsys = ifelse(other_ein!="" & filer_hrrcode==other_hrrcode & (filer_sysid!=other_sysid | is.na(other_sysid)), 1, 0)) %>%
+  mutate(connected_samesys = ifelse(is.na(connected_samesys), 0, connected_samesys)) %>%
+  mutate(connected_diffsys = ifelse(is.na(connected_diffsys), 0, connected_diffsys)) %>%
+  mutate(unconnected_in_HRR = ifelse(connected_samesys==0 & connected_diffsys==0, 1, 0))
 
-hospital_connections %>%
-  filter(unconnected_in_HRR==0 & connected_samesys==0 & connected_diffsys==0)
 
 # how many hospitals are connected in same system each year?
 hospital_connections %>%
   group_by(TaxYr) %>%
-  summarise(n_connected = sum(connected_samesys),
+  summarise(n_connected_samesys = sum(connected_samesys),
             n_connected_diffsys = sum(connected_diffsys),
             n_unconnected = sum(unconnected_in_HRR))
 

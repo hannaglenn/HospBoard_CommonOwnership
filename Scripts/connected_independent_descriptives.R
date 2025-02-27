@@ -31,6 +31,32 @@ board_people <- people %>%
   filter(board_member==1) %>%
   select(TaxYr, Filer.EIN, name_cleaned)
 
+# clean up extras in names
+board_people$name_cleaned <- str_remove(board_people$name_cleaned, "deceased")
+board_people$name_cleaned <- str_remove(board_people$name_cleaned, "\\seff$")
+board_people$name_cleaned <- str_remove(board_people$name_cleaned, "\\scsjp$")
+board_people$name_cleaned <- str_remove(board_people$name_cleaned, "\\scisa$")
+board_people$name_cleaned <- str_remove(board_people$name_cleaned, "^mrs\\s")
+board_people$name_cleaned <- str_remove(board_people$name_cleaned, "^reverend\\s")
+board_people$name_cleaned <- str_remove(board_people$name_cleaned, "\\scns$")
+
+
+
+# define function to normalize the name columns to take care of different order of first, last
+normalize_name <- function(name) {
+  # Split by spaces
+  parts <- unlist(strsplit(name, " "))
+  
+  # Remove single-letter initials (optional)
+  parts <- parts[nchar(parts) > 1]
+  
+  # Sort non-initial parts alphabetically
+  paste(sort(parts), collapse = " ")
+}
+
+board_people$name_cleaned <- sapply(board_people$name_cleaned, normalize_name)
+
+
 # remove empty names and one-word names
 board_people <- board_people %>%
   filter(str_detect(name_cleaned, "[a-zA-Z]")) %>%
