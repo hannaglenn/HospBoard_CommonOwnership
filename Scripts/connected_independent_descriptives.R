@@ -9,7 +9,7 @@ library(readr)
 
 created_data_path <- "CreatedData/"
 
-## Compare connected systems to unconnected systems 
+## Compare connected independent hospitals to unconnected independent hospitals
 
 
 ###### PART 1: CLEAN DATA ###############################################################################################################################
@@ -40,6 +40,13 @@ board_people$name_cleaned <- str_remove(board_people$name_cleaned, "^mrs\\s")
 board_people$name_cleaned <- str_remove(board_people$name_cleaned, "^reverend\\s")
 board_people$name_cleaned <- str_remove(board_people$name_cleaned, "\\scns$")
 
+# look at random sample of 10 EINs
+board_people %>%
+  ungroup() %>%
+  select(Filer.EIN) %>%
+  distinct() %>%
+  sample_n(10)
+
 
 
 # define function to normalize the name columns to take care of different order of first, last
@@ -64,7 +71,7 @@ board_people <- board_people %>%
 
 # join AHA data to get HRR and state
 AHA <- read_csv("RawData/AHAdata_20052023.csv") %>%
-  select(ID, YEAR, STCD, HRRCODE, SYSID) %>%
+  select(ID, YEAR, HRRCODE, SYSID) %>%
   filter(YEAR>=2015 & YEAR<=2023) %>%
   mutate(YEAR = as.character(YEAR))
 
@@ -83,10 +90,11 @@ source("Scripts//function1_standardize_names.R")
 # these have to be in the same EIN to be combined
 board_people <- standardize_names(board_people, max_dist = 3)
 
-# also standardize names that are a very close match within the same HRR
+# also standardize names that are a very close match within the same HRR (more strict matches)
 board_people <- board_people %>%
   rename(hrrcode = HRRCODE) %>%
   standardize_names_hrr(., max_dist = 2)
+
 
 # run the script titled "function2_find_common_board_members"
 source("Scripts//function2_identify_common_members.R")
@@ -102,13 +110,18 @@ board_people <- board_people %>%
 board_people <- board_people %>%
   separate_wider_delim(other_eins, delim = ",", names_sep = "", too_few="align_start")
 
+# distinct
+board_people <- board_people %>%
+  distinct(Filer.EIN, TaxYr, name_cleaned, other_eins1, other_eins2, other_eins3)
+
 # wide to long in other_eins
 board_people <- board_people %>%
   pivot_longer(cols = starts_with("other_eins"), names_to = "num_board", values_to = "other_ein")
 
 # remove NA values in other_ein
 board_people <- board_people %>%
-  filter(!is.na(other_ein))
+  filter(!(num_board=="other_eins2" & is.na(other_ein))) %>%
+  filter(!(num_board=="other_eins3" & is.na(other_ein)))
 
 # trim the white space on other_ein
 board_people$other_ein <- str_trim(board_people$other_ein)
@@ -118,7 +131,7 @@ AHA <-  read_csv("RawData/AHAdata_20052023.csv")
 
 # Keep AHA variables I want
 AHA <- AHA %>%
-  select(ID, YEAR, SYSID, STCD, LONG, LAT, HRRCODE) %>%
+  select(ID, YEAR, SYSID, FSTCD, LONG, LAT, HRRCODE) %>%
   filter(YEAR>=2016 & YEAR<=2022)
 
 # Are there any duplicates in ID, YEAR?
@@ -138,7 +151,7 @@ board_people <- board_people %>%
 
 # Rename variables to show that they are the filer geographic information
 board_people <- board_people %>%
-  rename(filer_id=ID, filer_sysid = SYSID, filer_stcd = STCD, filer_long = LONG, filer_lat = LAT, filer_hrrcode = HRRCODE)
+  rename(filer_id=ID, filer_sysid = SYSID, filer_stcd = FSTCD, filer_long = LONG, filer_lat = LAT, filer_hrrcode = HRRCODE)
 
 # Merge AHA data to the other_ein data
 board_people <- board_people %>%
@@ -146,7 +159,7 @@ board_people <- board_people %>%
 
 # Rename variables to show that they are the other_ein geographic information
 board_people <- board_people %>%
-  rename(other_id=ID, other_sysid = SYSID, other_stcd = STCD, other_long = LONG, other_lat = LAT, other_hrrcode = HRRCODE)
+  rename(other_id=ID, other_sysid = SYSID, other_stcd = FSTCD, other_long = LONG, other_lat = LAT, other_hrrcode = HRRCODE)
 
 # Create hospital-level connections data
 hospital_connections <- board_people %>%
@@ -175,7 +188,7 @@ hospital_connections <- hospital_connections %>%
   mutate(unconnected_in_HRR = ifelse(connected_ind==0 & connected_sys==0, 1, 0)) 
 
 
-# how many hospitals are connected in same system each year?
+# how many hospitals are connected each year?
 hospital_connections %>%
   distinct(TaxYr, Filer.EIN, connected_ind, connected_sys, unconnected_in_HRR) %>%
   group_by(TaxYr) %>%
@@ -275,8 +288,11 @@ hosp_data <- hospital_connections %>%
 AHA <- read_csv("RawData/AHAdata_20052023.csv")
 
 AHA <- AHA %>%
-  select(YEAR, ID, GENBD, PEDBD, OBBD, MSICBD, CICBD, NICBD, NINTBD, PEDICBD, BRNBD, SPCICBD, OTHICBD, REHABBD, ALCHBD, PSYBD, SNBD88, ICFBD88, ACULTBD, 
-         OTHLBD94, OTHBD94, HOSPBD, FTMT, FTRNTF, ICLABHOS, MCDDC, MCRDC) %>%
+  select(YEAR, ID, GENBD, GENHOS, GENVEN, PEDBD, PEDHOS, PEDVEN, OBBD, OBHOS, OBVEN, MSICBD, MSICHOS, MSICVEN,
+         CICBD, CICHOS, CICVEN, NICBD, NICHOS, NICVEN, NINTBD, NINTHOS, NINTVEN, PEDICBD, PEDICHOS, PEDICVEN, 
+         BRNBD, BRNHOS, BRNVEN, SPCICBD, SPCICHOS, SPCICVEN, OTHICBD, OTHICHOS, OTHICVEN, REHABBD, REHABHOS, REHABVEN, 
+         ALCHBD, ALCHHOS, ALCHVEN, PSYBD, PSYHOS, PSYVEN, SNBD88, SNHOS, SNVEN, ICFBD88, ICFHOS, ICFVEN, ACULTBD, ACULTHOS, ACULTVEN,
+         OTHLBD94, OTHBD94, HOSPBD, FTMT, FTRNTF, ICLABHOS, MCDDC, MCRDC, SERV) %>%
   filter(YEAR>=2016 & YEAR<=2022)
 
 # create indicators for offering each type of service
