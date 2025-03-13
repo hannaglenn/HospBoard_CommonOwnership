@@ -6,6 +6,9 @@ library(stringr)
 library(ggplot2)
 library(patchwork)
 library(readr)
+library(data.table)
+library(kableExtra)
+library(purrr)
 
 created_data_path <- "CreatedData/"
 
@@ -15,21 +18,30 @@ created_data_path <- "CreatedData/"
 ###### PART 1: CLEAN DATA ###############################################################################################################################
 
 # Read in cleaned up version of names found in 990 tax forms
-people <- read_rds(paste0(created_data_path, "cleaned_people_data.rds"))
+people <- read_rds(paste0(created_data_path, "cleaned_people_data2.rds"))
 
 # Read is crosswalk of AHA ID - EIN, only keeping those who match to a standalone hospital
-cw <- read_csv(paste0(created_data_path, "EIN_AHA_cw.csv")) %>%
-  select(ID, ein_hosp) %>%
-  filter(!is.na(ein_hosp))
+cw <- readRDS(paste0(created_data_path, "updated_ein_aha_cw.rds")) 
 
 # Clean up the people data 
 # only keep people whose EIN is in the crosswalk as a standalone hospital
-people <- people %>% filter(Filer.EIN %in% cw$ein_hosp)
+people <- people %>% filter(Filer.EIN %in% cw$Filer.EIN)
 
 # only keep people who are board members
 board_people <- people %>%
   filter(board_member==1) %>%
   select(TaxYr, Filer.EIN, name_cleaned)
+
+# Only keep EINs present in 2017-2021
+ein_keep <- board_people %>%
+  distinct(TaxYr, Filer.EIN) %>%
+  mutate(count = ifelse(TaxYr %in% 2017:2021, 1, 0)) %>%
+  group_by(Filer.EIN) %>%
+  summarise(count = sum(count)) %>%
+  filter(count>=5)
+
+board_people <- board_people %>%
+  filter(Filer.EIN %in% ein_keep$Filer.EIN)
 
 # clean up extras in names
 board_people$name_cleaned <- str_remove(board_people$name_cleaned, "deceased")
@@ -39,6 +51,11 @@ board_people$name_cleaned <- str_remove(board_people$name_cleaned, "\\scisa$")
 board_people$name_cleaned <- str_remove(board_people$name_cleaned, "^mrs\\s")
 board_people$name_cleaned <- str_remove(board_people$name_cleaned, "^reverend\\s")
 board_people$name_cleaned <- str_remove(board_people$name_cleaned, "\\scns$")
+board_people$name_cleaned <- str_remove_all(board_people$name_cleaned, "january|february|march|june|july|august|september|october|november|december|dec\\b")
+
+# get rid of empty names
+board_people <- board_people %>%
+  filter(name_cleaned!="" & !str_detect(name_cleaned, "ceo|cfo"))
 
 # look at random sample of 10 EINs
 board_people %>%
@@ -46,8 +63,6 @@ board_people %>%
   select(Filer.EIN) %>%
   distinct() %>%
   sample_n(10)
-
-
 
 # define function to normalize the name columns to take care of different order of first, last
 normalize_name <- function(name) {
@@ -63,37 +78,43 @@ normalize_name <- function(name) {
 
 board_people$name_cleaned <- sapply(board_people$name_cleaned, normalize_name)
 
-
 # remove empty names and one-word names
 board_people <- board_people %>%
   filter(str_detect(name_cleaned, "[a-zA-Z]")) %>%
   filter(str_count(name_cleaned, " ")>0)
 
 # join AHA data to get HRR and state
-AHA <- read_csv("RawData/AHAdata_20052023.csv") %>%
-  select(ID, YEAR, HRRCODE, SYSID) %>%
+AHA <- read_csv("RawData/AHAdata_20052023.csv") 
+
+AHA_hrr <- AHA %>%
+  select(ID, YEAR, HRRCODE, SYSID, MNAME, NETWRK, NETNAME) %>%
   filter(YEAR>=2015 & YEAR<=2023) %>%
   mutate(YEAR = as.character(YEAR))
 
 board_people <- board_people %>%
-  left_join(cw, by = c("Filer.EIN" = "ein_hosp")) %>%
-  left_join(AHA, by = c("ID", "TaxYr"="YEAR"))
+  left_join(cw, by = c("Filer.EIN")) %>%
+  left_join(AHA_hrr, by = c("ID", "TaxYr"="YEAR"))
 
-# only keep hospitals that do not belong to systems
+# fill HRR code
 board_people <- board_people %>%
-  filter(is.na(SYSID))
+  group_by(Filer.EIN) %>%
+  fill(HRRCODE, .direction = "downup") %>%
+  ungroup()
+
+# how many IDs?
+length(unique(board_people$ID))
+  #1520
 
 # run the script titled "function1_standardize_names"
 source("Scripts//function1_standardize_names.R")
 
 # combine names that have a slight misspelling using the standardize names function
 # these have to be in the same EIN to be combined
-board_people <- standardize_names(board_people, max_dist = 3)
+board_people <- standardize_names_optimized(board_people, max_dist = 3)
 
 # also standardize names that are a very close match within the same HRR (more strict matches)
 board_people <- board_people %>%
-  rename(hrrcode = HRRCODE) %>%
-  standardize_names_hrr(., max_dist = 2)
+  standardize_names_by_hrr(., max_dist = 2)
 
 
 # run the script titled "function2_find_common_board_members"
@@ -126,45 +147,66 @@ board_people <- board_people %>%
 # trim the white space on other_ein
 board_people$other_ein <- str_trim(board_people$other_ein)
 
-# Bring in the AHA data to merge in system and geographic information on the hospitals
-AHA <-  read_csv("RawData/AHAdata_20052023.csv")
-
-# Keep AHA variables I want
-AHA <- AHA %>%
-  select(ID, YEAR, SYSID, FSTCD, LONG, LAT, HRRCODE) %>%
+# Merge in AHA geographic information
+AHA_geog <- AHA %>%
+  select(ID, YEAR, SYSID, NETNAME, FSTCD, LONG, LAT, HRRCODE, MNAME) %>%
   filter(YEAR>=2016 & YEAR<=2022)
 
 # Are there any duplicates in ID, YEAR?
-AHA %>% 
+AHA_geog %>% 
   group_by(ID, YEAR) %>%
   summarise(n = n()) %>%
   filter(n > 1)
 
 # Merge AHA data to the AHA - EIN crosswalk
 cw <- cw %>%
-  left_join(AHA, by = "ID") 
+  left_join(AHA_geog, by = "ID") 
 
 # Merge AHA data to the board_people data
 board_people <- board_people %>%
   mutate(TaxYr = as.numeric(TaxYr)) %>%
-  left_join(cw, by = c("Filer.EIN" = "ein_hosp", "TaxYr"="YEAR"))
+  left_join(cw, by = c("Filer.EIN", "TaxYr"="YEAR"))
 
 # Rename variables to show that they are the filer geographic information
 board_people <- board_people %>%
-  rename(filer_id=ID, filer_sysid = SYSID, filer_stcd = FSTCD, filer_long = LONG, filer_lat = LAT, filer_hrrcode = HRRCODE)
+  rename(filer_id=ID, filer_sysid = SYSID, filer_stcd = FSTCD, filer_long = LONG, filer_lat = LAT, filer_hrrcode = HRRCODE,
+         filer_name = MNAME, filer_net = NETNAME)
 
 # Merge AHA data to the other_ein data
 board_people <- board_people %>%
-  left_join(cw, by = c("other_ein" = "ein_hosp", "TaxYr"="YEAR"))
+  left_join(cw, by = c("other_ein" = "Filer.EIN", "TaxYr"="YEAR"))
 
 # Rename variables to show that they are the other_ein geographic information
 board_people <- board_people %>%
-  rename(other_id=ID, other_sysid = SYSID, other_stcd = FSTCD, other_long = LONG, other_lat = LAT, other_hrrcode = HRRCODE)
+  rename(other_id=ID, other_sysid = SYSID, other_stcd = FSTCD, other_long = LONG, other_lat = LAT, other_hrrcode = HRRCODE,
+         other_name = MNAME, other_net = NETNAME)
+
+# Remove any observations with NA for ID at any point
+board_people <- board_people %>%
+  mutate(missing = ifelse(is.na(filer_id) & TaxYr %in% 2017:2021, 1, 0)) %>%
+  group_by(Filer.EIN) %>%
+  filter(sum(missing)==0) %>%
+  filter(TaxYr!=2015)
+
 
 # Create hospital-level connections data
 hospital_connections <- board_people %>%
-  distinct(TaxYr, Filer.EIN, other_ein, filer_id, filer_sysid, filer_stcd, filer_long, filer_lat, filer_hrrcode,
-           other_id, other_sysid, other_stcd, other_long, other_lat, other_hrrcode) 
+  distinct(TaxYr, Filer.EIN, other_ein, filer_id, filer_sysid, filer_stcd, filer_long, filer_lat, filer_hrrcode,filer_name, filer_net,
+           other_id, other_sysid, other_stcd, other_long, other_lat, other_hrrcode, other_name, other_net) 
+
+# only keep connections in the same HRR
+hospital_connections <- hospital_connections %>%
+  filter(filer_hrrcode==other_hrrcode | is.na(other_hrrcode))
+
+# only keep connections with hospitals not affiliated by system
+hospital_connections <- hospital_connections %>%
+  filter(is.na(filer_sysid) | is.na(other_sysid) | filer_sysid!=other_sysid)
+
+# get rid of connections where the name indicates system affiliation even if system id is missing
+hospital_connections <- hospital_connections %>%
+  mutate(name_dist = stringdist::stringdist(str_extract(filer_name,"[A-Za-z]+\\s"), str_extract(other_name,"[A-Za-z]+\\s"), method = "jw")) %>%
+  filter(name_dist!=0 | is.na(name_dist))
+
 
 # If a hospital has a connection in a given year, remove the empty other_ein row
 hospital_connections <- hospital_connections %>%
@@ -173,56 +215,82 @@ hospital_connections <- hospital_connections %>%
   fill(connected, .direction = "downup") %>%
   ungroup() %>%
   mutate(connected = ifelse(is.na(connected), 0, connected)) %>%
-  filter(!(other_ein=="" & connected==1))
+  filter(!(other_ein=="" & connected==1)) %>%
+  distinct() %>%
+  select(-connected)
+
+
+## PART 2: SUMMARIZE HOSPITAL CONNECTIONS #########################################################
+
+# look at random sample of 10 EINs
+hospital_connections %>%
+  ungroup() %>%
+  select(Filer.EIN) %>%
+  distinct() %>%
+  sample_n(10)
+  
+hospital_pairs <- hospital_connections %>%
+  mutate(connected = ifelse(other_ein!="", 1, NA)) %>%
+  group_by(TaxYr, Filer.EIN) %>%
+  fill(connected, .direction = "downup") %>%
+  ungroup() %>%
+  mutate(connected = ifelse(is.na(connected), 0, connected))
 
 # define connections within the same HRR
 # 3 types of connections: unconnected, connected to another independent hosp, connected to a hosp in a system
 hospital_connections <- hospital_connections %>%
-  mutate(connected_ind = ifelse(other_ein!="" & filer_hrrcode==other_hrrcode & is.na(other_sysid), 1, NA)) %>%
-  mutate(connected_sys = ifelse(other_ein!="" & filer_hrrcode==other_hrrcode & !is.na(other_sysid), 1, NA)) %>%
+  mutate(connected = ifelse(other_ein!="", 1, NA)) %>%
   group_by(TaxYr, Filer.EIN) %>%
-  fill(connected_ind, connected_sys, .direction = "downup") %>%
+  fill(connected, .direction = "downup") %>%
   ungroup() %>%
-  mutate(connected_ind = ifelse(is.na(connected_ind), 0, connected_ind),
-         connected_sys = ifelse(is.na(connected_sys), 0, connected_sys)) %>%
-  mutate(unconnected_in_HRR = ifelse(connected_ind==0 & connected_sys==0, 1, 0)) 
+  mutate(connected = ifelse(is.na(connected), 0, connected)) %>%
+  distinct(Filer.EIN, filer_id, filer_hrrcode, TaxYr, connected)
 
 
-# how many hospitals are connected each year?
+# how many hospitals are connected in each year?
 hospital_connections %>%
-  distinct(TaxYr, Filer.EIN, connected_ind, connected_sys, unconnected_in_HRR) %>%
   group_by(TaxYr) %>%
-  summarise(n_connected_ind = sum(connected_ind),
-            n_connected_sys = sum(connected_sys),
-            n_unconnected = sum(unconnected_in_HRR))
+  summarise(n_connected = sum(connected))
 
-# graph the percent of hospitals that are connected in the same system each year
+
+# graph the percent of hospitals that are connected in each year
 hospital_connections %>%
-  distinct(TaxYr, Filer.EIN, connected_ind, connected_sys, unconnected_in_HRR) %>%
   group_by(TaxYr) %>%
-  summarise(n_connected_ind = sum(connected_ind),
-            n_connected_sys = sum(connected_sys),
-            n_unconnected = sum(unconnected_in_HRR)) %>%
-  mutate(pct_connected = n_connected_ind/(n_connected_ind+n_connected_sys+n_unconnected)) %>%
-  ggplot(aes(x=TaxYr, y=pct_connected)) +
-  geom_line() +
-  geom_point() +
-  labs(title = "Percent of independent hospitals that share a board member\nwith another ind. hospital in their market",
+  summarise(m_connected = mean(connected)) %>%
+  ggplot(aes(x=TaxYr)) +
+  geom_line(aes(y=m_connected)) +
+  labs(title = "Hospitals with overlapping board members",
        x = "Year",
-       y = "Percent\n") +
-  theme_minimal() + xlim(2016,2022) + ylim(0,1)
-ggsave("Objects//connected_independent_percent.pdf", width=5, height=4)
+       y = "Percent of Hospitals\n") +
+  theme_minimal() + xlim(2017,2021) + ylim(0,.5) +
+  labs(color='')
+ggsave("Objects//connected_percent.pdf", width=5, height=4)
+
+# Graph the percent of HRRs that have connected hospitals within them
+hospital_connections %>%
+  group_by(TaxYr, filer_hrrcode) %>%
+  summarise(connected = sum(connected)) %>%
+  mutate(connected = ifelse(connected>0, 1, 0)) %>%
+  group_by(TaxYr) %>%
+  summarise(m_connected = mean(connected)) %>%
+  ggplot(aes(x=TaxYr)) +
+  geom_line(aes(y=m_connected)) +
+  labs(title = "HRRs with board affiliated hospitals",
+       x = "Year",
+       y = "Percent of HRRs\n") +
+  theme_minimal() + xlim(2017,2021) + ylim(0,.5) +
+  labs(color='')
+
+ggsave("Objects//connected_independent_HRR_percent.pdf", width=5, height=4)
 
 
 # plot geographically the hospitals that are connected
-
 plot_map <- function(df, year) {
   df_year <- df %>% filter(TaxYr == year)
   
   # Identify hospitals with at least one connection
   connected_hospitals <- df_year %>%
-    filter(!is.na(other_ein) & other_ein != "") %>%
-    filter(filer_hrrcode==other_hrrcode & is.na(other_sysid)) %>%
+    filter(connected==1) %>%
     select(Filer.EIN) %>%
     distinct()
   
@@ -235,8 +303,7 @@ plot_map <- function(df, year) {
   
   # Filter hospitals with board connections
   df_filtered <- df_year %>%
-    filter(!is.na(other_ein) & other_ein != "") %>%
-    filter(filer_hrrcode==other_hrrcode & is.na(other_sysid))
+    filter(connected==1)
   
   
   # Generate the plot
@@ -253,7 +320,7 @@ plot_map <- function(df, year) {
                size = 0.65) +
     scale_color_manual(values = c("Connected" = "blue", "Unconnected" = "red")) + 
     theme_minimal() +
-    labs(title = paste("In-system hospitals that share a board member\nwithin their system and market -", year)) +
+    labs(title = paste("Hospital Connections", year)) +
     coord_fixed(1.3)  +
     ylim(20,50) + xlim(-130,-60) +
     theme(legend.position = "none")
@@ -266,37 +333,243 @@ us_states <- map_data("state")
 
 # 1. Geographic map of connection within the same HRR excluding systems
 
-plot_map(hospital_connections, 2017)
+plot_map(hospital_pairs, 2017)
 
 # Generate maps for each year (2017-2022)
-plots <- lapply(2017:2022, function(year) plot_map(hospital_connections, year))
+plots <- lapply(2017:2022, function(year) plot_map(hospital_pairs, year))
 
 # Combine plots into a single graphic
 combined_plot <- wrap_plots(plots, ncol = 2)  
 
 # save combined plot
-ggsave("Objects//common_boards_independent_maps.pdf", width = 8, height = 11, units = "in")
+ggsave("Objects//connected_maps.pdf", width = 8, height = 11, units = "in")
 
 
+# Summarise hospital pairs
+hospital_connected_pairs <- hospital_pairs %>%
+  select(TaxYr, filer_id, other_id) %>%
+  filter(!is.na(filer_id) & !is.na(other_id))
 
-# Make a summary stats table of observable features of connected vs. unconnected hospitals ####
+AHA_pair <- AHA %>%
+  select(YEAR, ID, SERV, BDTOT, MNAME, SYSID) %>%
+  filter(YEAR>=2016 & YEAR<=2022)
 
-hosp_data <- hospital_connections %>%
-  distinct(Filer.EIN, filer_id, TaxYr, connected_ind, unconnected_in_HRR) 
+# join by filer_id
+hospital_connected_pairs <- hospital_connected_pairs %>%
+  left_join(AHA_pair, by=c("filer_id"="ID", "TaxYr"="YEAR")) %>%
+  rename(filer_SERV = SERV, filer_BDTOT = BDTOT, filer_name = MNAME, filer_sysid = SYSID) %>%
+  left_join(AHA_pair, by=c("other_id"="ID", "TaxYr"="YEAR")) %>%
+  rename(other_SERV = SERV, other_BDTOT = BDTOT, other_name = MNAME, other_sysid = SYSID)
 
-# Read in AHA data and keep variables I need
-AHA <- read_csv("RawData/AHAdata_20052023.csv")
+# create variables capturing type of relationship (general - general/ general - specialty/specialty - specialty)
+hospital_connected_pairs <- hospital_connected_pairs %>%
+  mutate(gen_gen = ifelse(filer_SERV==10 & other_SERV==10,1,0),
+         gen_spec = ifelse((filer_SERV==10 & other_SERV %in% c(13,22,33,41,42,44,45,46,47,48,49)) | (other_SERV==10 & filer_SERV %in% c(13,22,33,41,42,44,45,46,47,48,49)),1,0),
+         spec_spec = ifelse(filer_SERV %in% c(13,22,33,41,42,44,45,46,47,48,49) & other_SERV %in% c(13,22,33,41,42,44,45,46,47,48,49),1,0),
+         adult_child = ifelse((filer_SERV %in% c(10,13,22,33,41,42,44,45,46,47,48,49) & other_SERV %in% 50:59) | (other_SERV %in% c(13,22,33,41,42,44,45,46,47,48,49) & filer_SERV %in% 50:59),1,0))
 
-AHA <- AHA %>%
+# create variables capturing ownership relationship (ind - ind/sys - sys/ind - sys)
+hospital_connected_pairs <- hospital_connected_pairs %>%
+  mutate(ind_ind = ifelse(is.na(filer_sysid) & is.na(other_sysid), 1, 0),
+         sys_sys = ifelse(!is.na(filer_sysid) & !is.na(other_sysid), 1, 0),
+         ind_sys = ifelse((is.na(filer_sysid) & !is.na(other_sysid)) | (!is.na(filer_sysid) & is.na(other_sysid)), 1, 0))
+
+# put these values in a table 
+pair_table <- hospital_connected_pairs %>%
+  summarise("General - General" = mean(gen_gen),
+            "General - Specialty" = mean(gen_spec),
+            "Specialty - Specialty" = mean(spec_spec),
+            "Adult - Childrens" = mean(adult_child),
+            "Ind. - Ind." = mean(ind_ind),
+            "Sys. - Sys." = mean(sys_sys),
+            "Ind. - Sys." = mean(ind_sys))
+
+# pivot longer
+pair_table <- pair_table %>%
+  pivot_longer(cols = `General - General`:`Ind. - Sys.`, names_to = "variable", values_to = "value")
+
+knitr::kable(pair_table, format = "latex",
+             col.names = c("Variable", "Mean"),
+             caption = "Types of Hospital Connections",
+             row.names = FALSE,
+             table.envir="table",
+             digits=2,
+             booktabs=TRUE,
+             escape=F,
+             align=c("l","c"),
+             position="ht!") %>%
+  kable_styling(full_width=F) %>%
+  write("Objects//hospital_pair_types.tex")
+
+# Summarise connected general hospitals vs. unconnected general hospitals 
+gen_connected <- hospital_connected_pairs %>%
+  filter(gen_gen==1) %>%
+  select(TaxYr, filer_id, other_id) %>%
+  distinct(TaxYr, filer_id) %>%
+  mutate(gen_gen=1)
+
+gen_unconnected <- hospital_pairs %>%
+  filter(other_ein=="") %>%
+  distinct(TaxYr, filer_id) %>%
+  left_join(AHA_pair, by=c("filer_id"="ID", "TaxYr"="YEAR")) %>%
+  filter(SERV==10) %>%
+  mutate(gen_gen=0) %>%
+  select(TaxYr, filer_id, gen_gen)
+
+# combine the two
+gen_hosp_connections <- bind_rows(gen_connected, gen_unconnected)
+
+# get AHA variables I want to summarise in this table
+AHA_gen <- AHA %>%
+  select(YEAR, ID, GENBD, PEDBD, OBBD, MSICBD, CICBD, NICBD, NINTBD, PEDICBD, 
+         BRNBD, SPCICBD, REHABBD, OTHICBD, ACULTBD, ALCHBD, PSYBD, SNBD88, ICFBD88,
+         OTHLBD94, OTHBD94, HOSPBD, FTMT, FTRNTF, ICLABHOS, MCDDC, MCRDC, HRRCODE)
+  
+gen_hosp_connections <- gen_hosp_connections %>%
+  left_join(AHA_gen, by=c("filer_id"="ID", "TaxYr"="YEAR"))
+
+# fill missing variables when applicable
+gen_hosp_connections <- gen_hosp_connections %>%
+  group_by(filer_id) %>%
+  fill(GENBD:OTHBD94, HRRCODE, .direction = "downup") %>%
+  ungroup()
+
+# create variable for how concentrated services are (hhi)
+gen_hosp_connections <- gen_hosp_connections %>%
+  mutate(hhi = (GENBD/HOSPBD)^2 + (PEDBD/HOSPBD)^2 + (OBBD/HOSPBD)^2 + (MSICBD/HOSPBD)^2 + (CICBD/HOSPBD)^2 + (NICBD/HOSPBD)^2 + (NINTBD/HOSPBD)^2 + 
+           (PEDICBD/HOSPBD)^2 + (BRNBD/HOSPBD)^2 + (SPCICBD/HOSPBD)^2 + (OTHICBD/HOSPBD)^2 + (REHABBD/HOSPBD)^2 + (ALCHBD/HOSPBD)^2 + 
+           (PSYBD/HOSPBD)^2 + (SNBD88/HOSPBD)^2 + (ICFBD88/HOSPBD)^2 + (ACULTBD/HOSPBD)^2 + (OTHLBD94/HOSPBD)^2 + (OTHBD94/HOSPBD)^2)
+
+
+# Create variables measuring the overlap in services of hospitals in the same HRR
+
+# create new variables for whether each service is offered or not
+gen_hosp_connections <- gen_hosp_connections %>%
+  mutate(GEN = ifelse(GENBD>0, 1, 0),
+         PED = ifelse(PEDBD>0, 1, 0),
+         OB = ifelse(OBBD>0, 1, 0),
+         MSIC = ifelse(MSICBD>0, 1, 0),
+         CIC = ifelse(CICBD>0, 1, 0),
+         NIC = ifelse(NICBD>0, 1, 0),
+         NINT = ifelse(NINTBD>0, 1, 0),
+         PEDIC = ifelse(PEDICBD>0, 1, 0),
+         BRN = ifelse(BRNBD>0, 1, 0),
+         SPCIC = ifelse(SPCICBD>0, 1, 0),
+         OTHIC = ifelse(OTHICBD>0, 1, 0),
+         REHAB = ifelse(REHABBD>0, 1, 0),
+         ALCH = ifelse(ALCHBD>0, 1, 0),
+         PSY = ifelse(PSYBD>0, 1, 0),
+         SN = ifelse(SNBD88>0, 1, 0),
+         ICF = ifelse(ICFBD88>0, 1, 0),
+         ACULT = ifelse(ACULTBD>0, 1, 0),
+         OTHL = ifelse(OTHLBD94>0, 1, 0),
+         OTH = ifelse(OTHBD94>0, 1, 0))
+
+bed_cols <- c("GEN", "PED", "OB", "MSIC", "CIC", "NIC", "NINT", "PEDIC", "BRN", "SPCIC", "OTHIC", "REHAB", "ALCH", "PSY", "SN", "ICF", "ACULT", "OTHL", "OTH")
+
+compute_jaccard_similarity <- function(df){
+  df %>%
+    group_by(TaxYr, HRRCODE) %>%
+    mutate(
+      jaccard_similarity = map_dbl(row_number(), function(i) {
+        a <- as.numeric(df[i, bed_cols])  # Current hospital's services
+        
+        # Compute Jaccard similarity with all other hospitals in the same HRR
+        similarities <- map_dbl(setdiff(row_number(), i), function(j) {
+          b <- as.numeric(df[j, bed_cols])  # Other hospital's services
+          
+          if (sum(a | b) == 0) return(NA)  # Avoid division by zero
+          
+          sum(a & b) / sum(a | b)  # Jaccard similarity formula
+        })
+        
+        mean(similarities, na.rm = TRUE)  # Average similarity across all comparisons
+      })
+    ) %>%
+    ungroup()
+}
+
+
+gen_hosp_connections <- compute_jaccard_similarity(gen_hosp_connections) 
+
+# create summary stats table for connected vs. unconnected hospitals
+gen_hosp_connections %>%
+  filter(TaxYr %in% 2017:2021) %>%
+  mutate(group = ifelse(gen_gen==1, "Gen - Gen Connected", "General Unconnected")) %>%
+  group_by(group) %>%
+  summarise("Num Beds" = mean(HOSPBD, na.rm = TRUE),
+            "Concentration of Services" = mean(hhi, na.rm = TRUE),
+            "Overlap within HRR" = mean(jaccard_similarity, na.rm = TRUE)) %>%
+  t() %>%
+  kable(format = "latex",
+        col.names = c("Gen - Gen Connected", "General Unconnected"),
+        caption = "Summary Statistics of Connected vs. Unconnected Hospitals",
+        row.names = TRUE,
+        table.envir="table",
+        digits=2,
+        booktabs=TRUE,
+        escape=F,
+        align=c("l","c"),
+        position="ht!") %>%
+  write("Objects//hospital_connected_summary.tex")
+
+# graph concentration of services by connected vs. unconnected
+gen_hosp_connections %>%
+  filter(TaxYr %in% 2017:2021) %>%
+  mutate(group = ifelse(gen_gen==1, "Gen - Gen Connected", "General Unconnected")) %>%
+  group_by(TaxYr, group) %>%
+  summarise("Concentration of Services" = mean(hhi, na.rm = TRUE)) %>%
+  ggplot(aes(x=TaxYr, y=`Concentration of Services`, color=group)) +
+  geom_line() +
+  labs(title = "Concentration of Services by Connected vs. Unconnected Hospitals",
+       x = "Year",
+       y = "Concentration of Services") +
+  theme_minimal() + xlim(2017,2021) + ylim(.2,.8) + 
+  labs(color='')
+ggsave("Objects//concentration_services_time.pdf", width=7, height=4)
+
+
+# Make a summary stats table of observable features of connected vs. unconnected hospitals 
+
+# create a variable for the first year a hospital pair is connected
+minyr_connections <- ind_hosp_connections %>%
+  filter(connected_ind_sameHRR==1) %>%
+  group_by(Filer.EIN) %>%
+  mutate(first_year_ind_connected = min(TaxYr)) %>%
+  ungroup() %>%
+  distinct(Filer.EIN, first_year_ind_connected)
+
+ind_hosp_connections <- ind_hosp_connections %>%
+  left_join(minyr_connections, by=c("Filer.EIN")) %>%
+  mutate(first_year_ind_connected = ifelse(is.na(first_year_ind_connected), 0, first_year_ind_connected))
+
+minyr_connections <- ind_hosp_connections %>%
+  filter(connected_sys_sameHRR==1) %>%
+  group_by(Filer.EIN) %>%
+  mutate(first_year_sys_connected = min(TaxYr)) %>%
+  ungroup() %>%
+  distinct(Filer.EIN, first_year_sys_connected)
+
+ind_hosp_connections <- ind_hosp_connections %>%
+  left_join(minyr_connections, by=c("Filer.EIN")) %>%
+  mutate(first_year_sys_connected = ifelse(is.na(first_year_sys_connected), 0, first_year_sys_connected))
+
+
+ind_hosp_data <- ind_hosp_connections %>%
+  distinct(Filer.EIN, filer_id, TaxYr, connected_ind_sameHRR, connected_sys_sameHRR, unconnected_in_HRR, 
+           first_year_ind_connected, first_year_sys_connected) 
+
+
+AHA_services <- AHA %>%
   select(YEAR, ID, GENBD, GENHOS, GENVEN, PEDBD, PEDHOS, PEDVEN, OBBD, OBHOS, OBVEN, MSICBD, MSICHOS, MSICVEN,
          CICBD, CICHOS, CICVEN, NICBD, NICHOS, NICVEN, NINTBD, NINTHOS, NINTVEN, PEDICBD, PEDICHOS, PEDICVEN, 
-         BRNBD, BRNHOS, BRNVEN, SPCICBD, SPCICHOS, SPCICVEN, OTHICBD, OTHICHOS, OTHICVEN, REHABBD, REHABHOS, REHABVEN, 
-         ALCHBD, ALCHHOS, ALCHVEN, PSYBD, PSYHOS, PSYVEN, SNBD88, SNHOS, SNVEN, ICFBD88, ICFHOS, ICFVEN, ACULTBD, ACULTHOS, ACULTVEN,
+         BRNBD, BRNHOS, BRNVEN, SPCICBD, SPCICHOS, SPCICVEN, REHABBD, REHABHOS, REHABVEN, OTHICBD, ACULTBD,
+         ALCHBD, ALCHHOS, ALCHVEN, PSYBD, PSYHOS, PSYVEN, SNBD88, SNHOS, SNVEN, ICFBD88, ICFHOS, ICFVEN,
          OTHLBD94, OTHBD94, HOSPBD, FTMT, FTRNTF, ICLABHOS, MCDDC, MCRDC, SERV) %>%
   filter(YEAR>=2016 & YEAR<=2022)
 
 # create indicators for offering each type of service
-AHA <- AHA %>%
+AHA_services <- AHA_services %>%
   mutate(GEN = ifelse(GENBD>0, 1, 0),
          PED = ifelse(PEDBD>0, 1, 0),
          OB = ifelse(OBBD>0, 1, 0),
@@ -318,41 +591,46 @@ AHA <- AHA %>%
          OTH = ifelse(OTHBD94>0, 1, 0))
 
 # create variable for number of physicians/nurses per bed
-AHA <- AHA %>%
+AHA_services <- AHA_services %>%
   mutate(physicians_per_bed = FTMT/HOSPBD,
          nurses_per_bed = FTRNTF/HOSPBD)
 
 # Create measure of concentration of services offered using HHI formula with number of beds in each service GENBD:OTHBD94
-AHA <- AHA %>%
+AHA_services <- AHA_services %>%
   mutate(hhi = (GENBD/HOSPBD)^2 + (PEDBD/HOSPBD)^2 + (OBBD/HOSPBD)^2 + (MSICBD/HOSPBD)^2 + (CICBD/HOSPBD)^2 + (NICBD/HOSPBD)^2 + (NINTBD/HOSPBD)^2 + 
            (PEDICBD/HOSPBD)^2 + (BRNBD/HOSPBD)^2 + (SPCICBD/HOSPBD)^2 + (OTHICBD/HOSPBD)^2 + (REHABBD/HOSPBD)^2 + (ALCHBD/HOSPBD)^2 + 
            (PSYBD/HOSPBD)^2 + (SNBD88/HOSPBD)^2 + (ICFBD88/HOSPBD)^2 + (ACULTBD/HOSPBD)^2 + (OTHLBD94/HOSPBD)^2 + (OTHBD94/HOSPBD)^2)
 
 # create indicator for whether the hospital has a NICU and cath lab
-AHA <- AHA %>%
+AHA_services <- AHA_services %>%
   mutate(NICU = ifelse(NICBD>0, 1, 0),
          cath_lab = ICLABHOS)
 
 # create variable for number of services offered
-AHA <- AHA %>%
-  mutate(num_services = rowSums(select(AHA, GEN:OTH), na.rm = TRUE))
+AHA_services <- AHA_services %>%
+  mutate(num_services = rowSums(select(AHA_services, GEN:OTH), na.rm = TRUE))
 
 # create variables for medicare/medicaid patients per bed
-AHA <- AHA %>%
+AHA_services <- AHA_services %>%
   mutate(MCDDC = MCDDC/HOSPBD,
          MCRDC = MCRDC/HOSPBD)
 
 # keep only variables I need
-AHA <- AHA %>%
+AHA_services <- AHA_services %>%
   select(YEAR, ID, HOSPBD, physicians_per_bed, nurses_per_bed, num_services, hhi, NICU, cath_lab, MCDDC, MCRDC)
 
 # join AHA data with hospital data
-hosp_data <- hosp_data %>%
-  left_join(AHA, by=c("filer_id"="ID", "TaxYr"="YEAR"))
+ind_hosp_data <- ind_hosp_data %>%
+  left_join(AHA_services, by=c("filer_id"="ID", "TaxYr"="YEAR"))
 
 # create summary stats table for connected vs. unconnected
-summary_table <- hosp_data %>%
-  group_by(connected_ind) %>%
+ind_summary_table <- ind_hosp_data %>%
+  filter(TaxYr %in% 2017:2021) %>%
+  mutate(group = ifelse(connected_ind_sameHRR==1 & connected_sys_sameHRR==0, "Connected to Ind.", NA)) %>%
+  mutate(group = ifelse(connected_ind_sameHRR==1 & connected_sys_sameHRR==1, "Connected to Both", group)) %>%
+  mutate(group = ifelse(connected_ind_sameHRR==0 & connected_sys_sameHRR==1, "Connected to Sys.", group)) %>%
+  mutate(group = ifelse(connected_ind_sameHRR==0 & connected_sys_sameHRR==0, "Unconnected", group)) %>%
+  group_by(group) %>%
   summarise("Num Beds" = mean(HOSPBD, na.rm = TRUE),
             "Num Physicians/Bed" = mean(physicians_per_bed, na.rm = TRUE),
             "Num Nurses/Bed" = mean(nurses_per_bed, na.rm = TRUE),
@@ -364,23 +642,26 @@ summary_table <- hosp_data %>%
             "Medicare discharges/Bed" = mean(MCRDC, na.rm = TRUE))
 
 # transpose with variable names as additional columns
-summary_table <- summary_table %>%
+ind_summary_table <- ind_summary_table %>%
   pivot_longer(cols = `Num Beds`:`Medicare discharges/Bed`, names_to = "variable", values_to = "value") %>%
-  pivot_wider(names_from = connected_ind, values_from = value) 
+  pivot_wider(names_from = group, values_from = value) 
 
 # add number of unique systems as variable labeled "n"
-summary_table <- summary_table %>%
-  add_row(variable = "n", `0` = round(nrow(hosp_data %>% filter(connected_ind==0))/7,0),
-          `1` = round(nrow(hosp_data %>% filter(connected_ind==1))/7,0)) 
+ind_summary_table <- ind_summary_table %>%
+  add_row(variable = "n", `Connected to Both` = round(nrow(ind_hosp_data %>% filter(connected_ind_sameHRR==1 & connected_sys_sameHRR==1))/5,0),
+                 `Connected to Ind.` = round(nrow(ind_hosp_data %>% filter(connected_ind_sameHRR==1 & connected_sys_sameHRR==0))/5,0),
+                 `Connected to Sys.` = round(nrow(ind_hosp_data %>% filter(connected_ind_sameHRR==0 & connected_sys_sameHRR==1))/5,0),
+                 `Unconnected` = round(nrow(ind_hosp_data %>% filter(connected_ind_sameHRR==0 & connected_sys_sameHRR==0))/5,0))
+
 
 # round values to 2 digits
-summary_table <- summary_table %>%
+ind_summary_table <- ind_summary_table %>%
   mutate(across(where(is.numeric), ~round(., 2)))
 
 # create a knitr table
-table <- knitr::kable(summary_table, format = "latex",
-                      col.names = c("Variable", "Unconnected", "Connected"),
-                      caption = "Means for independent hospitals",
+table <- knitr::kable(ind_summary_table, format = "latex",
+                      col.names = c("Variable", "Connected to Both", "Connected to Ind.", "Connected to Sys.", "Unconnected"),
+                      caption = "Averages of Independent Hospitals",
                       row.names = FALSE,
                       table.envir="table",
                       digits=2,
@@ -392,20 +673,54 @@ table <- knitr::kable(summary_table, format = "latex",
 # save as a tex file
 write(table, file="Objects//means_independent_table.tex")
 
+# Create a table capturing summary statistics of HRRs in each category
+
 
 # graph average concentration of services over time for unconnected vs. connected hospitals
-hosp_data %>%
-  group_by(connected_ind, TaxYr) %>%
+ind_hosp_data %>%
+  filter(TaxYr %in% 2017:2021) %>%
+  mutate(group = ifelse(connected_ind_sameHRR==1 & connected_sys_sameHRR==0, "Connected to Ind.", NA)) %>%
+  mutate(group = ifelse(connected_ind_sameHRR==1 & connected_sys_sameHRR==1, "Connected to Both", group)) %>%
+  mutate(group = ifelse(connected_ind_sameHRR==0 & connected_sys_sameHRR==1, "Connected to Sys.", group)) %>%
+  mutate(group = ifelse(connected_ind_sameHRR==0 & connected_sys_sameHRR==0, "Unconnected", group)) %>%
+  group_by(group, TaxYr) %>%
   summarise(hhi = mean(hhi, na.rm = TRUE)) %>%
-  ggplot(aes(x=TaxYr, y=hhi, color=as.factor(connected_ind))) +
+  ggplot(aes(x=TaxYr, y=hhi, color=group)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Average concentration of services offered by hospitals",
+       x = "Year",
+       y = "HHI") +
+  theme_minimal() + xlim(2017,2021) + ylim(0,1)
+ggsave("Objects//connected_independent_hhi.pdf", width=7, height=4)
+
+# graph average hhi, grouping by first_year_connected
+ind_hosp_data %>%
+  filter(first_year_ind_connected %in% c(0,2018,2019,2020)) %>%
+  group_by(first_year_ind_connected, TaxYr) %>%
+  summarise(hhi = mean(hhi, na.rm = TRUE)) %>%
+  ggplot(aes(x=TaxYr, y=hhi, color=as.factor(first_year_ind_connected))) +
   geom_line() +
   geom_point() +
   labs(title = "Average concentration of services offered by hospitals",
        x = "Year",
        y = "HHI") +
   theme_minimal() + xlim(2016,2022) + ylim(0,1)
+  # there's just such a small number of hospitals in each category
 
-
+# graph using relative year
+ind_hosp_data %>%
+  mutate(rel_year = TaxYr - first_year_ind_connected) %>%
+  group_by(rel_year) %>%
+  filter(first_year_ind_connected %in% c(2019)) %>%
+  summarise(hhi = mean(hhi, na.rm = TRUE)) %>%
+  ggplot(aes(x=rel_year, y=hhi)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Average concentration of services offered by hospitals",
+       x = "Relative Year",
+       y = "HHI") +
+  theme_minimal() + xlim(-2,2) + ylim(0,1)
 
 
 
@@ -529,3 +844,10 @@ table <- knitr::kable(pairs_avgs, format = "latex",
                       position="ht!") %>%
   kable_styling(full_width=F)
 write(table, file="Objects//connected_indpair_diff_table.tex")
+
+
+
+
+
+# Do hospitals that become connected change their services offered?
+

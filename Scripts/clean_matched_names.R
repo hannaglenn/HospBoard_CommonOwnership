@@ -2,12 +2,15 @@ library(readr)
 library(stringr)
 library(dplyr)
 
-created_data_path <- "C:/Users/hkagele/Downloads"
+created_data_path <- "CreatedData/"
 
 # Script to clean up the name columns of people data scraped from 990s
 
 all_people_data <- readRDS(paste0(created_data_path, "/all_people_data_scheduleH.rds"))
-cw <- read_csv(paste0(created_data_path, "/EIN_AHA_cw.csv"))
+cw <- readRDS(paste0(created_data_path, "/updated_ein_aha_cw.rds"))
+
+cw <- cw %>%
+  filter(!is.na(ID))
 
 # any missing Filer.EIN?
 observe <- all_people_data %>%
@@ -16,7 +19,7 @@ observe <- all_people_data %>%
 
 # only keep observations where EIN is found in either ein_hosp or ein_sys
 all_people_data <- all_people_data %>%
-  filter(Filer.EIN %in% c(cw$ein_hosp, cw$ein_sys))
+  filter(Filer.EIN %in% cw$Filer.EIN)
 
 # look at unique values of section
 unique(all_people_data$Section)
@@ -80,21 +83,17 @@ people_data <- people_data %>%
   mutate(mha = ifelse(str_detect(PersonNm, "\\smha$|\\smha\\s"),1,0)) %>%
   mutate(mha = ifelse(str_detect(TitleTxt, "\\smha$|\\smha\\s"),1,mha))
 
+observe <- people_data %>%
+  filter(str_detect(name_cleaned, "-"))
 
-# pull out words that come before a dash at the beginning of the string for certain EIN
+# remove "see schedule o"
 people_data <- people_data %>%
-  mutate(name_cleaned=PersonNm) %>%
-  mutate(extra = ifelse(Filer.EIN==900059117, str_extract(name_cleaned, "^[a-z\\s]+-"), NA)) %>%
-  mutate(name_cleaned = ifelse(Filer.EIN==900059117, str_remove(name_cleaned, "^[a-z\\s]+-"), name_cleaned))
+  mutate(name_cleaned = str_remove(name_cleaned, " - see sch o"))
 
-# for the rest of dashed observaitons, remove everything that comes after the dash and put it in "extra" variable
+# Remove punctuation and digits from names
 people_data <- people_data %>%
-  mutate(extra = ifelse(str_detect(name_cleaned, "-"), str_extract(name_cleaned, "-[a-z\\s]+$"), extra)) %>%
-  mutate(name_cleaned = ifelse(str_detect(name_cleaned, "-"), str_remove(name_cleaned, "-[a-z\\s::punct::]+$"), name_cleaned))
-
-# Remove punctuation from names
-people_data <- people_data %>%
-  mutate(name_cleaned = str_remove_all(name_cleaned, "[[:punct:]]"))
+  mutate(name_cleaned = str_remove_all(name_cleaned, "[[:punct:]]")) %>%
+  mutate(name_cleaned = str_remove_all(name_cleaned, "[0-9]+"))
 
 # remove common doctor titles and anything that comes after them in the string
 titles <- c("md", "do", "od", "rn", "mbbch", "mbbs", "dnp", "until", "as of", "mha", "eff", "end", "beg", "thru", "through", "osb",
@@ -130,10 +129,6 @@ people_data <- people_data %>%
 #people_data <- people_data %>%
 #mutate(name_cleaned = str_remove(name_cleaned, "^[a-z]\\s"))
 
-# remove any digits
-people_data <- people_data %>%
-  mutate(name_cleaned = str_remove_all(name_cleaned, "\\d"))
-
 # goal 2: clean up TitleTxt column ####
 
 # change titles to lower case
@@ -150,7 +145,7 @@ people_data <- people_data %>%
   mutate(ex_officio = ifelse(str_detect(TitleTxt, "ex officio|ex-officio|exofficio|ex-off"),1,0)) %>%
   mutate(TitleTxt = str_remove_all(TitleTxt, "ex officio|ex-officio|exofficio|ex-off"))
 
-# remove columns containing "former"
+# remove rows containing "former"
 people_data <- people_data %>%
   filter(!(str_detect(TitleTxt, "former|\\bfmr\\b|past|\\bfr\\b")))
 
@@ -360,7 +355,7 @@ people_data <- people_data %>%
 
 
 # save this version of the data
-saveRDS(people_data, paste0(created_data_path, "/cleaned_people_data.rds"))
+saveRDS(people_data, paste0(created_data_path, "/cleaned_people_data2.rds"))
 
 
 
