@@ -11,7 +11,6 @@ library(kableExtra)
 library(purrr)
 library(ggpubr)
 
-# Ein that is getting dropped somewhere: 010130427
 
 created_data_path <- "CreatedData/"
 
@@ -239,6 +238,10 @@ hospital_connections %>%
   select(Filer.EIN) %>%
   distinct() %>%
   sample_n(10)
+
+# how many unqie filer.eins?
+length(unique(hospital_connections$Filer.EIN))
+  # 1499
   
 hospital_pairs <- hospital_connections %>%
   mutate(connected = ifelse(other_ein!="" & !is.na(other_ein), 1, NA)) %>%
@@ -276,7 +279,7 @@ hospital_connections %>%
   theme_minimal() + xlim(2017,2021) + ylim(0,.5) +
   labs(color='') +
   # add labels for the raw number of hospitals at each point using num_conn_list
-  geom_label(aes(x=TaxYr, y=m_connected, label=num_conn_list$n_connected), vjust=-1, size = 3)
+  geom_label(aes(x=TaxYr, y=m_connected, label=num_conn_list$n_connected), vjust=-1, size = 2.5)
   
 ggsave("Objects//connected_percent.pdf", width=6, height=4)
 
@@ -304,7 +307,7 @@ hospital_connections %>%
   theme_minimal() + xlim(2017,2021) + ylim(0,.5) +
   labs(color='') +
   # add labels for the raw number of hospitals at each point using num_conn_list
-  geom_label(aes(x=TaxYr, y=m_connected, label=num_conn_list$n_connected), vjust=-1, size = 3)
+  geom_label(aes(x=TaxYr, y=m_connected, label=num_conn_list$n_connected), vjust=-1, size = 2.5)
 
 ggsave("Objects//connected_HRR_percent.pdf", width=6, height=4)
 
@@ -433,7 +436,9 @@ knitr::kable(pair_table, format = "latex",
   pack_rows(" ",5,7) %>%
   write("Objects//hospital_pair_types.tex")
 
-# Summarise connected general hospitals vs. unconnected general hospitals 
+# Summarise different types of hospital connections
+
+# Summarise the different types of hospitals
 gen_connected <- hospital_connected_pairs %>%
   filter(gen_gen==1) %>%
   distinct(TaxYr, filer_id) %>%
@@ -454,8 +459,19 @@ spec_connected_gen <- hospital_connected_pairs %>%
   mutate(group = "Specialty Connected to General")
 n_spec_connected_gen <- nrow(distinct(spec_connected_gen, filer_id))
 
+gen_unconnected_sys <- hospital_pairs %>%
+  filter(other_ein==""|is.na(other_ein)) %>%
+  filter(!is.na(filer_sysid)) %>%
+  distinct(TaxYr, filer_id) %>%
+  left_join(AHA_pair, by=c("filer_id"="ID", "TaxYr"="YEAR")) %>%
+  filter(SERV==10) %>%
+  mutate(group = "General Unconnected, Part of System") %>%
+  select(TaxYr, filer_id, group)
+n_gen_unconnected_sys <- nrow(distinct(gen_unconnected_sys, filer_id))
+
 gen_unconnected <- hospital_pairs %>%
   filter(other_ein==""|is.na(other_ein)) %>%
+  filter(is.na(filer_sysid)) %>%
   distinct(TaxYr, filer_id) %>%
   left_join(AHA_pair, by=c("filer_id"="ID", "TaxYr"="YEAR")) %>%
   filter(SERV==10) %>%
@@ -463,8 +479,19 @@ gen_unconnected <- hospital_pairs %>%
   select(TaxYr, filer_id, group)
 n_gen_unconnected <- nrow(distinct(gen_unconnected, filer_id))
 
+spec_unconnected_sys <- hospital_pairs %>%
+  filter(other_ein==""|is.na(other_ein)) %>%
+  filter(!is.na(filer_sysid)) %>%
+  distinct(TaxYr, filer_id) %>%
+  left_join(AHA_pair, by=c("filer_id"="ID", "TaxYr"="YEAR")) %>%
+  filter(SERV %in% c(13,22,33,41,42,44,45,46,47,48,49)) %>%
+  mutate(group = "Specialty Unconnected, Part of System") %>%
+  select(TaxYr, filer_id, group)
+n_spec_unconnected_sys <- nrow(distinct(spec_unconnected_sys, filer_id))
+
 spec_unconnected <- hospital_pairs %>%
   filter(other_ein==""|is.na(other_ein)) %>%
+  filter(is.na(filer_sysid)) %>%
   distinct(TaxYr, filer_id) %>%
   left_join(AHA_pair, by=c("filer_id"="ID", "TaxYr"="YEAR")) %>%
   filter(SERV %in% c(13,22,33,41,42,44,45,46,47,48,49)) %>%
@@ -472,8 +499,9 @@ spec_unconnected <- hospital_pairs %>%
   select(TaxYr, filer_id, group)
 n_spec_unconnected <- nrow(distinct(spec_unconnected, filer_id))
 
-# combine the two
-gen_hosp_connections <- bind_rows(gen_connected, gen_connected_spec, spec_connected_gen, gen_unconnected, spec_unconnected)
+# combine the data
+gen_hosp_connections <- bind_rows(gen_connected, gen_connected_spec, gen_unconnected_sys,
+                                  gen_unconnected, spec_connected_gen, spec_unconnected, spec_unconnected_sys)
 
 # get AHA variables I want to summarise in this table
 AHA_gen <- AHA %>%
@@ -618,9 +646,10 @@ table_data <- gen_hosp_connections %>%
             "Has a NICU" = mean(NIC, na.rm=T),
             "Has a Cath Lab" = mean(ACLABHOS, na.rm=T),
             "Concentration of Services (AHA)" = mean(hhi, na.rm = TRUE),
-            "Overlap within HRR (AHA)" = mean(jaccard_similarity_aha, na.rm = TRUE),
+            #"Overlap within HRR (AHA)" = mean(jaccard_similarity_aha, na.rm = TRUE),
             "Concentration of Services (CMS)" = mean(hhi_cms, na.rm=T),
-            "Overlap within HRR (CMS)" = mean(jaccard_similarity_cms, na.rm=T)) %>%
+            #"Overlap within HRR (CMS)" = mean(jaccard_similarity_cms, na.rm=T)
+            ) %>%
   t() %>%
   as.data.frame() %>%
   # make row names into its own column
@@ -634,12 +663,15 @@ table_data <- table_data %>%
           `General Connected to Specialty` = n_gen_connected_spec,
           `Specialty Connected to General` = n_spec_connected_gen,
           `General Unconnected` = n_gen_unconnected,
-          `Specialty Unconnected` = n_spec_unconnected) 
+          `Specialty Unconnected` = n_spec_unconnected,
+          `General Unconnected, Part of System` = n_gen_unconnected_sys,
+          `Specialty Unconnected, Part of System` = n_spec_unconnected_sys) 
   
-  
-kable(table_data, format = "latex",
-        col.names = c("Variable", "Connected to General", "Connected to Specialty", "Unconnected", "Connected to General", "Unconnected"),
-        caption = "Summary Statistics",
+# one table devoted to general hospitals   
+kable(table_data %>% select(group, `General Connected to General`, `General Connected to Specialty`, `General Unconnected, Part of System`, `General Unconnected`), 
+      format = "latex",
+        col.names = c("Variable", "Affiliated w/ General", "Affiliated w/ Specialty", "Unaffiliated, Part of System", "Unaffiliated, Not Part of System"),
+        caption = "Summary Statistics of General Hospitals",
         row.names = FALSE,
         table.envir="table",
         digits=2,
@@ -647,27 +679,42 @@ kable(table_data, format = "latex",
         escape=F,
         align=c("l","c","c","c","c","c"),
         position="ht!") %>%
-  add_header_above(c(" " = 1, "General" = 3, "Specialty" = 2)) %>%
   group_rows("Characteristics", 1, 5) %>%
-  group_rows("Services", 6, 11) %>%
-  write("Objects//hospital_connected_summary.tex")
+  group_rows("Services", 6, 9) %>%
+  write("Objects//hospital_general_summarystats.tex")
 
-
+# separate table for specialty hospitals
+kable(table_data %>% select(group, `Specialty Connected to General`, `Specialty Unconnected, Part of System`, `Specialty Unconnected`), 
+      format = "latex",
+        col.names = c("Variable", "Affiliated w/ General", "Unaffiliated, Part of System", "Unaffiliated, Not Part of System"),
+        caption = "Summary Statistics of Specialty Hospitals",
+        row.names = FALSE,
+        table.envir="table",
+        digits=2,
+        booktabs=TRUE,
+        escape=F,
+        align=c("l","c","c","c"),
+        position="ht!") %>%
+  group_rows("Characteristics", 1, 3) %>%
+  group_rows("Services", 4, 6) %>%
+  write("Objects//hospital_specialty_summarystats.tex")
 
 
 # graph concentration of services by connected vs. unconnected
 gen_hosp_connections %>%
-  filter(group %in% c("General Connected to General", "General Unconnected")) %>%
+  filter(group %in% c("General Connected to General", "General Unconnected", "General Unconnected, Part of System")) %>%
   filter(TaxYr %in% 2017:2021) %>%
   group_by(TaxYr, group) %>%
   summarise("Concentration of Services" = mean(hhi, na.rm = TRUE)) %>%
   ggplot(aes(x=TaxYr, y=`Concentration of Services`, color=group)) +
   geom_line() +
-  labs(title = "Concentration of Services of General Hospitals",
+  labs(title = "",
        x = "\nYear",
-       y = "Concentration of Services\n") +
+       y = "Concentration of Services Offered\n") +
   theme_minimal() + xlim(2017,2021) + ylim(.2,.8) + 
-  labs(color='')
+  labs(color='') + 
+  # change color palette to color blind friendly
+  scale_color_manual(values = c("General Connected to General" = "#E69F00", "General Unconnected" = "#56B4E9", "General Unconnected, Part of System" = "#009E73")) 
 ggsave("Objects//concentration_services_time.pdf", width=7, height=4)
 
 
