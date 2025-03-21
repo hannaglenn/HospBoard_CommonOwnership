@@ -634,6 +634,40 @@ gen_hosp_connections <- gen_hosp_connections %>%
   mutate(academic = ifelse(MAPP5==1,1,0)) %>%
   mutate(metro = ifelse(str_detect(Rndrng_Prvdr_RUCA_Desc, "Metropolitan"),1,0)) 
 
+# create general summary stats for all hospitals
+# create mean, min, and max of relevant variables for all hospitals
+n_hosp <- nrow(distinct(gen_hosp_connections, filer_id))
+gen_hosp_connections %>%
+  mutate(connected = ifelse(group %in% c("General Connected to General", "General Connected to Specialty", "Specialty Connected to General"), 1, 0)) %>%
+  summarise_at(c("Number of Beds"="HOSPBD", 
+                 "Number of Medicare Patients"="Tot_Benes", 
+                 "Avg Medicare Patient Age"="Bene_Avg_Age", 
+                 "Academic Medical Center"="academic", 
+                 "In Metropolitan Area"="metro", 
+                 "Affiliated Through Board"="connected", 
+                 "Has a NICU"="NIC", 
+                 "Has a Cath Lab"="ACLABHOS", 
+                 "Service Concentration (beds)"="hhi", 
+                 "Service Concentration (conditions)"="hhi_cms"), 
+               list(m=mean,min=min,max=max,sd=sd), na.rm=TRUE) %>%
+  mutate_if(is.numeric, ~ifelse(abs(.)==Inf,NA,.))  %>%
+  gather(key=var,value=value) %>%
+  extract(col="var",into=c("variable", "statistic"), regex=("(.*)_(.*)$")) %>%
+  spread(key=statistic, value=value) %>%
+  relocate(variable,m,min,max,sd) %>%
+  add_row(variable = "Number of Hospitals", m = n_hosp) %>%
+  kable(format = "latex",
+        col.names = c("Variable", "Mean", "Min", "Max", "SD"),
+        caption = "Summary Statistics, All Hospitals\\label{all_sumstats}",
+        row.names = FALSE,
+        table.envir="table",
+        digits=2,
+        booktabs=TRUE,
+        escape=F,
+        align=c("l","c","c","c","c"),
+        position="ht!") %>%
+  write("Objects//all_summarystats.tex")
+
 
 # create summary stats table for connected vs. unconnected hospitals
 table_data <- gen_hosp_connections %>%
@@ -717,51 +751,400 @@ gen_hosp_connections %>%
   scale_color_manual(values = c("General Connected to General" = "#E69F00", "General Unconnected" = "#56B4E9", "General Unconnected, Part of System" = "#009E73")) 
 ggsave("Objects//concentration_services_time.pdf", width=7, height=4)
 
+# look at connected hospitals 
+observe <- gen_hosp_connections %>%
+  filter(group %in% c("General Connected to General", "General Connected to Specialty", "Specialty Connected to General"))
 
-# Look at what happens in the year a hospital becomes connected
+# how many hospitals remain connected once they are connected?
 
-# create a variable for the first year a hospital pair is connected
-minyr_connections <- hospital_connections %>%
-  filter(connected==1) %>%
+
+# create variables for hospitals gaining or losing connections
+connection_timing <- hospital_connections %>%
   group_by(filer_id) %>%
-  mutate(first_year_connected = min(TaxYr)) %>%
+  arrange(TaxYr) %>%
+  mutate(prev_connected = lag(connected, order_by = TaxYr)) %>%
+  mutate(post_connected = lead(connected, order_by = TaxYr)) %>%
+  ungroup() 
+connection_timing <- connection_timing %>%
+  mutate(lost_connection = ifelse(prev_connected==1 & connected==0, 1, 0),
+         gained_connection = ifelse(prev_connected==0 & connected==1, 1, 0))
+
+# drop hospitals who lost or gained multiple times
+connection_timing <- connection_timing %>%
+  group_by(filer_id) %>%
+  filter(sum(lost_connection, na.rm=T)<=1 & sum(gained_connection, na.rm=T)<=1) %>%
   ungroup() %>%
-  distinct(filer_id, first_year_connected)
+  select(-prev_connected, -post_connected)
 
-gen_hosp_connections <- gen_hosp_connections %>%
-  left_join(minyr_connections, by=c("filer_id")) %>%
-  mutate(first_year_connected = ifelse(is.na(first_year_connected), 0, first_year_connected))
+# create variables for minyrconnected and maxyrconnected
+connection_timing <- connection_timing %>%
+  group_by(filer_id) %>%
+  mutate(minyr_connected = min(TaxYr[connected==1], na.rm=T),
+         maxyr_connected = max(TaxYr[connected==1], na.rm=T)) %>%
+  ungroup() 
+
+lost_connection_data <- connection_timing %>%
+  group_by(filer_id) %>%
+  filter(sum(gained_connection, na.rm=T)==0) %>%
+  distinct(TaxYr, filer_id, maxyr_connected) %>%
+  mutate(maxyr_connected = ifelse(maxyr_connected=="-Inf", 0, maxyr_connected))
+
+# how many "treated hospitals"?
+lost_connection_data %>% filter(maxyr_connected %in% 2017:2021) %>% distinct(filer_id) %>% nrow()
+  #59 hospitals
+
+gained_connection_data <- connection_timing %>%
+  group_by(filer_id) %>%
+  filter(sum(lost_connection, na.rm=T)==0) %>%
+  distinct(TaxYr, filer_id, minyr_connected) %>%
+  mutate(minyr_connected = ifelse(minyr_connected=="Inf", 0, minyr_connected))
+
+# how many "treated hospitals"?
+gained_connection_data %>% filter(minyr_connected %in% 2017:2021) %>% distinct(filer_id) %>% nrow()
+  # 53 hospitals
+
+# join to gen_hosp_connections 
+lost_connection_data <- lost_connection_data %>%
+  left_join(gen_hosp_connections, by=c("filer_id", "TaxYr")) %>%
+  filter(TaxYr %in% 2017:2021) %>%
+  mutate(filer_id = as.numeric(filer_id))
+gained_connection_data <- gained_connection_data %>%
+  left_join(gen_hosp_connections, by=c("filer_id", "TaxYr")) %>%
+  filter(TaxYr %in% 2017:2021) %>%
+  mutate(filer_id = as.numeric(filer_id))
+
+# create list of outcomes I want to look at 
+outcomes <- c("hhi", "hhi_cms", "NIC", "ACLABHOS", "Tot_Benes", "Bene_Avg_Risk_Scre")
+
+# first look at effect of losing connection on these outcomes with the control group being general unconnected, part of system
+models_lost_sys <- lapply(outcomes, function(x){
+  all <- att_gt(yname = x,                # LHS Variable
+                gname = "maxyr_connected",             # First year a unit is treated. (set to 0 if never treated)
+                idname = "filer_id",               # ID
+                tname = "TaxYr",                  # Time Variable
+                xformla = NULL,                 # No covariates
+                filter(lost_connection_data,
+                       group %in% c("General Connected to General", "General Unconnected, Part of System")),
+                est_method = "dr",               # dr is for doubly robust. can also use "ipw" (inverse probability weighting) or "reg" (regression)
+                control_group = "nevertreated", # Set the control group to notyettreated or nevertreated
+                anticipation=0,
+                base_period = "varying" # can set a number of years to account for anticipation effects
+  )
+})
+
+models_lost_sys_agg <- lapply(models_lost_sys, function(x){
+  agg <- aggte(x, type = "dynamic",na.rm=T)
+  p <- x$Wpval
+  
+  list(agg=agg, p=p)
+})
+
+graph_data <- lapply(models_lost_sys_agg, function(x){
+  data <- as.data.frame(x[["agg"]][["egt"]]) %>%
+    dplyr::rename(year=1) %>%
+    cbind(as.data.frame(x[["agg"]][["att.egt"]])) %>%
+    dplyr::rename(att=2) %>%
+    cbind(as.data.frame(x[["agg"]][["se.egt"]])) %>%
+    dplyr::rename(se=3) %>%
+    mutate(upper=att+(1.96*se),
+           lower=att-(1.96*se),
+           group="Compared to Unconnected System Hospitals",
+           year=as.factor(year)
+    )
+  p <- x[["p"]]
+  
+  list(data=data, p=p)
+})
 
 
-# graph average hhi, grouping by first_year_connected
-gen_hosp_connections %>%
-  filter(group %in% c("General Connected to General", "General Unconnected")) %>%
-  filter(first_year_connected %in% c(0,2017,2018,2019,2020)) %>%
-  group_by(first_year_connected, TaxYr) %>%
-  summarise(hhi = mean(hhi, na.rm = TRUE)) %>%
-  ggplot(aes(x=TaxYr, y=hhi, color=as.factor(first_year_connected))) +
-  geom_line() +
-  geom_point() +
-  labs(title = "Average concentration of services offered by hospitals",
-       x = "Year",
-       y = "HHI") +
-  theme_minimal() + xlim(2017,2021) + ylim(0,1) +
-  labs(color='First Year Connected') 
-ggsave("Objects/concentration_services_time_minyr.pdf", width=7, height=4)
+# now look at lost connection, not part of system
+# first look at effect of losing connection on these outcomes with the control group being general unconnected, part of system
+models_lost_nosys <- lapply(outcomes, function(x){
+  all <- att_gt(yname = x,                # LHS Variable
+                gname = "maxyr_connected",             # First year a unit is treated. (set to 0 if never treated)
+                idname = "filer_id",               # ID
+                tname = "TaxYr",                  # Time Variable
+                xformla = NULL,                 # No covariates
+                filter(lost_connection_data,
+                       group %in% c("General Connected to General", "General Unconnected")),
+                est_method = "dr",               # dr is for doubly robust. can also use "ipw" (inverse probability weighting) or "reg" (regression)
+                control_group = "nevertreated", # Set the control group to notyettreated or nevertreated
+                anticipation=0,
+                base_period = "varying" # can set a number of years to account for anticipation effects
+  )
+})
+
+models_lost_nosys_agg <- lapply(models_lost_nosys, function(x){
+  agg <- aggte(x, type = "dynamic",na.rm=T)
+  p <- x$Wpval
+  
+  list(agg=agg, p=p)
+})
+
+graph_data_lost_nosys <- lapply(models_lost_nosys_agg, function(x){
+  data <- as.data.frame(x[["agg"]][["egt"]]) %>%
+    dplyr::rename(year=1) %>%
+    cbind(as.data.frame(x[["agg"]][["att.egt"]])) %>%
+    dplyr::rename(att=2) %>%
+    cbind(as.data.frame(x[["agg"]][["se.egt"]])) %>%
+    dplyr::rename(se=3) %>%
+    mutate(upper=att+(1.96*se),
+           lower=att-(1.96*se),
+           group="Compared to Unconnected No System Hospitals",
+           year=as.factor(year)
+    )
+  p <- x[["p"]]
+  
+  list(data=data, p=p)
+})
 
 
-# graph using relative year
-gen_hosp_connections %>%
-  mutate(rel_year = TaxYr - first_year_connected) %>%
-  group_by(rel_year) %>%
-  summarise(hhi = mean(hhi, na.rm = TRUE)) %>%
-  ggplot(aes(x=rel_year, y=hhi)) +
-  geom_line() +
-  geom_point() +
-  labs(title = "Average concentration of services offered by hospitals",
-       x = "Relative Year",
-       y = "HHI") +
-  theme_minimal() + xlim(-2,2) + ylim(0,1)
-ggsave("Objects/concentration_services_time_minyr_rel.pdf", width=6, height=4)
+# now do gained connection with comparison group being system unconnected 
+models_gain_sys <- lapply(outcomes, function(x){
+  all <- att_gt(yname = x,                # LHS Variable
+                gname = "minyr_connected",             # First year a unit is treated. (set to 0 if never treated)
+                idname = "filer_id",               # ID
+                tname = "TaxYr",                  # Time Variable
+                xformla = NULL,                 # No covariates
+                filter(gained_connection_data,
+                       group %in% c("General Connected to General", "General Unconnected, Part of System")),
+                est_method = "dr",               # dr is for doubly robust. can also use "ipw" (inverse probability weighting) or "reg" (regression)
+                control_group = "nevertreated", # Set the control group to notyettreated or nevertreated
+                anticipation=0,
+                base_period = "varying" # can set a number of years to account for anticipation effects
+  )
+})
+
+models_gain_sys_agg <- lapply(models_gain_sys, function(x){
+  agg <- aggte(x, type = "dynamic",na.rm=T)
+  p <- x$Wpval
+  
+  list(agg=agg, p=p)
+})
+
+graph_data_gain_sys <- lapply(models_gain_sys_agg, function(x){
+  data <- as.data.frame(x[["agg"]][["egt"]]) %>%
+    dplyr::rename(year=1) %>%
+    cbind(as.data.frame(x[["agg"]][["att.egt"]])) %>%
+    dplyr::rename(att=2) %>%
+    cbind(as.data.frame(x[["agg"]][["se.egt"]])) %>%
+    dplyr::rename(se=3) %>%
+    mutate(upper=att+(1.96*se),
+           lower=att-(1.96*se),
+           group="Compared to Unconnected System Hospitals",
+           year=as.factor(year)
+    )
+  p <- x[["p"]]
+  
+  list(data=data, p=p)
+})
+
+models_gain_nosys <- lapply(outcomes, function(x){
+  all <- att_gt(yname = x,                # LHS Variable
+                gname = "minyr_connected",             # First year a unit is treated. (set to 0 if never treated)
+                idname = "filer_id",               # ID
+                tname = "TaxYr",                  # Time Variable
+                xformla = NULL,                 # No covariates
+                filter(gained_connection_data,
+                       group %in% c("General Connected to General", "General Unconnected")),
+                est_method = "dr",               # dr is for doubly robust. can also use "ipw" (inverse probability weighting) or "reg" (regression)
+                control_group = "nevertreated", # Set the control group to notyettreated or nevertreated
+                anticipation=0,
+                base_period = "varying" # can set a number of years to account for anticipation effects
+  )
+})
+
+models_gain_nosys_agg <- lapply(models_gain_nosys, function(x){
+  agg <- aggte(x, type = "dynamic",na.rm=T)
+  p <- x$Wpval
+  
+  list(agg=agg, p=p)
+})
+
+graph_data_gain_nosys <- lapply(models_gain_nosys_agg, function(x){
+  data <- as.data.frame(x[["agg"]][["egt"]]) %>%
+    dplyr::rename(year=1) %>%
+    cbind(as.data.frame(x[["agg"]][["att.egt"]])) %>%
+    dplyr::rename(att=2) %>%
+    cbind(as.data.frame(x[["agg"]][["se.egt"]])) %>%
+    dplyr::rename(se=3) %>%
+    mutate(upper=att+(1.96*se),
+           lower=att-(1.96*se),
+           group="Compared to Unconnected No System Hospitals",
+           year=as.factor(year)
+    )
+  p <- x[["p"]]
+  
+  list(data=data, p=p)
+})
+
+
+dodge <- position_dodge(width=0.5) 
+
+
+# create graphs for all specifications of the AHA HHI specifications
+aha_hhi_lost <- rbind(graph_data[[1]]$data, graph_data_lost_nosys[[1]]$data) %>%
+  ggplot(aes(x=year, y=att, color=group)) + geom_vline(xintercept="0", linetype="dashed", colour="red") +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width=.0, size=1.1, position=dodge) +
+  geom_point(size=2.5, position=dodge) +
+  theme_bw() +
+  theme_light() +
+  geom_hline(yintercept=0, linetype="dashed") +
+  theme(text = element_text(size = 15)) +
+  xlab("") + ylab("Point Estimate and 95% CI\n") +
+  labs(title = "Losing Board Affiliation") +
+  geom_vline(xintercept=0, linetype="dashed", color="red") +
+  theme(panel.grid.major.x = element_blank() ,
+        panel.grid.major.y = element_line(size=.05, color="lightgray" )) +
+  paletteer::scale_colour_paletteer_d("ggthemes::excel_Badge") +
+  theme(legend.position="bottom") + 
+  theme(plot.caption=element_text(hjust = 0, size=15)) + 
+  guides(color=guide_legend(title=""))
+aha_hhi_gain <- rbind(graph_data_gain_sys[[1]]$data, graph_data_gain_nosys[[1]]$data) %>%
+  ggplot(aes(x=year, y=att, color=group)) + geom_vline(xintercept="0", linetype="dashed", colour="red") +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width=.0, size=1.1, position=dodge) +
+  geom_point(size=2.5, position=dodge) +
+  theme_bw() +
+  theme_light() +
+  geom_hline(yintercept=0, linetype="dashed") +
+  theme(text = element_text(size = 15)) +
+  xlab("") + ylab("Point Estimate and 95% CI\n") +
+  labs(title = "Gaining Board Affiliation") +
+  geom_vline(xintercept=0, linetype="dashed", color="red") +
+  theme(panel.grid.major.x = element_blank() ,
+        panel.grid.major.y = element_line(size=.05, color="lightgray" )) +
+  paletteer::scale_colour_paletteer_d("ggthemes::excel_Badge") +
+  theme(legend.position="right") + 
+  theme(plot.caption=element_text(hjust = 0, size=15)) +
+  guides(color=guide_legend(title=""))
+
+# combine plots into one 
+aha_hhi <- ggarrange(aha_hhi_lost, aha_hhi_gain, ncol=1, nrow=2, common.legend = TRUE, legend="bottom")
+ggsave("Objects/aha_hhi_did.pdf", aha_hhi, width=9, height=8.72)
+
+# Create graphs for CMS HHI
+cms_hhi_lost <- rbind(graph_data[[2]]$data, graph_data_lost_nosys[[2]]$data) %>%
+  ggplot(aes(x=year, y=att, color=group)) + geom_vline(xintercept="0", linetype="dashed", colour="red") +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width=.0, size=1.1, position=dodge) +
+  geom_point(size=2.5, position=dodge) +
+  theme_bw() +
+  theme_light() +
+  geom_hline(yintercept=0, linetype="dashed") +
+  theme(text = element_text(size = 15)) +
+  xlab("") + ylab("Point Estimate and 95% CI\n") +
+  geom_vline(xintercept=0, linetype="dashed", color="red") +
+  theme(panel.grid.major.x = element_blank() ,
+        panel.grid.major.y = element_line(size=.05, color="lightgray" )) +
+  labs(title = "Losing Board Affiliation") +
+  paletteer::scale_colour_paletteer_d("ggthemes::excel_Badge") +
+  theme(legend.position="bottom") + 
+  theme(plot.caption=element_text(hjust = 0, size=15)) + 
+  guides(color=guide_legend(title=""))
+cms_hhi_gain <- rbind(graph_data_gain_sys[[2]]$data, graph_data_gain_nosys[[2]]$data) %>%
+  ggplot(aes(x=year, y=att, color=group)) + geom_vline(xintercept="0", linetype="dashed", colour="red") +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width=.0, size=1.1, position=dodge) +
+  geom_point(size=2.5, position=dodge) +
+  theme_bw() +
+  theme_light() +
+  geom_hline(yintercept=0, linetype="dashed") +
+  theme(text = element_text(size = 15)) +
+  xlab("") + ylab("Point Estimate and 95% CI\n") +
+  geom_vline(xintercept=0, linetype="dashed", color="red") +
+  theme(panel.grid.major.x = element_blank() ,
+        panel.grid.major.y = element_line(size=.05, color="lightgray" )) +
+  labs(title = "Gaining Board Affiliation") +
+  paletteer::scale_colour_paletteer_d("ggthemes::excel_Badge") +
+  theme(legend.position="right") + 
+  theme(plot.caption=element_text(hjust = 0, size=15)) +
+  guides(color=guide_legend(title=""))
+
+# combine plots into one 
+cms_hhi <- ggarrange(cms_hhi_lost, cms_hhi_gain, ncol=1, nrow=2, common.legend = TRUE, legend="bottom")
+ggsave("Objects/cms_hhi_did.pdf", cms_hhi, width=9, height=8.72)
+
+# Create graphs for # patients
+# Create graphs for CMS HHI
+benes_lost <- rbind(graph_data[[5]]$data, graph_data_lost_nosys[[5]]$data) %>%
+  ggplot(aes(x=year, y=att, color=group)) + geom_vline(xintercept="0", linetype="dashed", colour="red") +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width=.0, size=1.1, position=dodge) +
+  geom_point(size=2.5, position=dodge) +
+  theme_bw() +
+  theme_light() +
+  geom_hline(yintercept=0, linetype="dashed") +
+  theme(text = element_text(size = 15)) +
+  xlab("") + ylab("Point Estimate and 95% CI\n") +
+  geom_vline(xintercept=0, linetype="dashed", color="red") +
+  theme(panel.grid.major.x = element_blank() ,
+        panel.grid.major.y = element_line(size=.05, color="lightgray" )) +
+  labs(title = "Losing Board Affiliation") +
+  paletteer::scale_colour_paletteer_d("ggthemes::excel_Badge") +
+  theme(legend.position="bottom") + 
+  theme(plot.caption=element_text(hjust = 0, size=15)) + 
+  guides(color=guide_legend(title=""))
+benes_gain <- rbind(graph_data_gain_sys[[5]]$data, graph_data_gain_nosys[[5]]$data) %>%
+  ggplot(aes(x=year, y=att, color=group)) + geom_vline(xintercept="0", linetype="dashed", colour="red") +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width=.0, size=1.1, position=dodge) +
+  geom_point(size=2.5, position=dodge) +
+  theme_bw() +
+  theme_light() +
+  geom_hline(yintercept=0, linetype="dashed") +
+  theme(text = element_text(size = 15)) +
+  xlab("") + ylab("Point Estimate and 95% CI\n") +
+  geom_vline(xintercept=0, linetype="dashed", color="red") +
+  theme(panel.grid.major.x = element_blank() ,
+        panel.grid.major.y = element_line(size=.05, color="lightgray" )) +
+  labs(title = "Gaining Board Affiliation") +
+  paletteer::scale_colour_paletteer_d("ggthemes::excel_Badge") +
+  theme(legend.position="right") + 
+  theme(plot.caption=element_text(hjust = 0, size=15)) +
+  guides(color=guide_legend(title=""))
+
+# combine plots into one 
+benes <- ggarrange(benes_lost, benes_gain, ncol=1, nrow=2, common.legend = TRUE, legend="bottom")
+ggsave("Objects/benes_did.pdf", benes, width=9, height=8.72)
+
+# Create graph for risk score of patients
+# Create graphs for CMS HHI
+risk_lost <- rbind(graph_data[[6]]$data, graph_data_lost_nosys[[6]]$data) %>%
+  ggplot(aes(x=year, y=att, color=group)) + geom_vline(xintercept="0", linetype="dashed", colour="red") +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width=.0, size=1.1, position=dodge) +
+  geom_point(size=2.5, position=dodge) +
+  theme_bw() +
+  theme_light() +
+  geom_hline(yintercept=0, linetype="dashed") +
+  theme(text = element_text(size = 15)) +
+  xlab("") + ylab("Point Estimate and 95% CI\n") +
+  geom_vline(xintercept=0, linetype="dashed", color="red") +
+  theme(panel.grid.major.x = element_blank() ,
+        panel.grid.major.y = element_line(size=.05, color="lightgray" )) +
+  labs(title = "Losing Board Affiliation") +
+  paletteer::scale_colour_paletteer_d("ggthemes::excel_Badge") +
+  theme(legend.position="bottom") + 
+  theme(plot.caption=element_text(hjust = 0, size=15)) + 
+  guides(color=guide_legend(title=""))
+risk_gain <- rbind(graph_data_gain_sys[[6]]$data, graph_data_gain_nosys[[6]]$data) %>%
+  ggplot(aes(x=year, y=att, color=group)) + geom_vline(xintercept="0", linetype="dashed", colour="red") +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width=.0, size=1.1, position=dodge) +
+  geom_point(size=2.5, position=dodge) +
+  theme_bw() +
+  theme_light() +
+  geom_hline(yintercept=0, linetype="dashed") +
+  theme(text = element_text(size = 15)) +
+  xlab("") + ylab("Point Estimate and 95% CI\n") +
+  geom_vline(xintercept=0, linetype="dashed", color="red") +
+  theme(panel.grid.major.x = element_blank() ,
+        panel.grid.major.y = element_line(size=.05, color="lightgray" )) +
+  labs(title = "Gaining Board Affiliation") +
+  paletteer::scale_colour_paletteer_d("ggthemes::excel_Badge") +
+  theme(legend.position="right") + 
+  theme(plot.caption=element_text(hjust = 0, size=15)) +
+  guides(color=guide_legend(title=""))
+
+# combine plots into one 
+risk <- ggarrange(risk_lost, risk_gain, ncol=1, nrow=2, common.legend = TRUE, legend="bottom")
+ggsave("Objects/risk_did.pdf", risk, width=9, height=8.72)
+
+
+
 
 

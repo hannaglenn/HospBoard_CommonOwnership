@@ -8,6 +8,9 @@ library(cdlTools)
 # Read in EIN data from XMLs
 all_ein_data <- readRDS("CreatedData/all_ein_data_scheduleH.rds")
 
+# How many EINs are in this data?
+length(unique(all_ein_data$Filer.EIN))
+
 # Get rid of EINs that don't appear from at least 2018-2021
 all_ein_data <- all_ein_data %>%
   mutate(present = ifelse(TaxYr>=2018 & TaxYr<=2021, 1, 0)) %>%
@@ -546,3 +549,8 @@ distinct_matches <- distinct_matches %>%
 # save distinct ein, ID crosswalk
 saveRDS(distinct_matches, "CreatedData/updated_ein_aha_cw.rds")
 
+# how many unique EINs?
+cw %>%
+  filter(!is.na(ID)) %>%
+  distinct(Filer.EIN) %>%
+  nrow()
